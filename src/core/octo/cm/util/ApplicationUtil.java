@@ -26,6 +26,7 @@ import octo.cm.exception.business.ApplicationException;
 import octo.cm.exception.business.PanelDesignException;
 import octocm.domain.observer.OctoDomainOpObserver;
 import octocm.workbench.dto.app.ApplicationDeployDto;
+import octocm.workbench.dto.app.ApplicationExtendConfigDto;
 import octocm.workbench.dto.app.ApplicationMenuDto;
 import org.nutz.dao.Cnd;
 import org.nutz.dao.entity.annotation.Comment;
@@ -51,6 +52,7 @@ public class ApplicationUtil {
     // 应用选择下拉框
     public static final String WIDGET_ID_APPLICATION_SELECT_EDITOR = "WIDGET_ID_APPLICATION_SELECT_EDITOR";
     public static final String FormModelId_Application = ApplicationDeployDto.FormModelId;
+    public static final String EXT_CONFIG_IP_WHITELIST = "ipWhitelistConfig";
 
     // ========================= 默认应用方法 =========================
     // 获取或弹出框让用户设置默认应用
@@ -222,6 +224,130 @@ public class ApplicationUtil {
 
 
     // ========================= 支撑方法 =========================
+
+
+    // ========================= Application extend config =========================
+
+    public static String getIpWhitelistConfig(Form applicationForm) throws Exception {
+        return getApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST);
+    }
+
+    public static String getIpWhitelistConfig(IDao dao, String appCode) throws Exception {
+        return getApplicationExtendConfig(dao, appCode, EXT_CONFIG_IP_WHITELIST);
+    }
+
+    public static void setIpWhitelistConfig(Form applicationForm, String configValue) throws Exception {
+        setApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST, configValue);
+    }
+
+    public static void updateIpWhitelistConfig(IDao dao, OctoDomainOpObserver observer, String appCode,
+                                               String configValue) throws Exception {
+        updateApplicationExtendConfig(dao, observer, appCode, EXT_CONFIG_IP_WHITELIST, configValue);
+    }
+
+    public static void saveIpWhitelistConfig(OctoDomainOpObserver observer, String appCode,
+                                             String configValue) throws Exception {
+        saveIpWhitelistConfig(observer, appCode, configValue, false);
+    }
+
+    public static void saveIpWhitelistConfig(OctoDomainOpObserver observer, String appCode,
+                                             String configValue, boolean deploy) throws Exception {
+        saveApplicationExtendConfig(observer, appCode, EXT_CONFIG_IP_WHITELIST, configValue, deploy);
+    }
+
+    public static String getApplicationExtendConfig(IDao dao, String appCode, String configItem) throws Exception {
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+        Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+        if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+        return getApplicationExtendConfig(applicationForm, configItem);
+    }
+
+    public static String getApplicationExtendConfig(Form applicationForm, String configItem) throws Exception {
+        Form configRow = findApplicationExtendConfigRow(applicationForm, configItem);
+        if (configRow == null) return null;
+        return configRow.getString(ApplicationExtendConfigDto.sValue);
+    }
+
+    public static void updateApplicationExtendConfig(IDao dao, OctoDomainOpObserver observer, String appCode,
+                                                     String configItem, String configValue) throws Exception {
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (observer == null) throw new RuntimeException("observer must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+        Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+        if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+
+        setApplicationExtendConfig(applicationForm, configItem, configValue);
+        IFormMgr.get().updateForm(null, dao, applicationForm, observer);
+    }
+
+    public static void saveApplicationExtendConfig(OctoDomainOpObserver observer, String appCode,
+                                                   String configItem, String configValue) throws Exception {
+        saveApplicationExtendConfig(observer, appCode, configItem, configValue, false);
+    }
+
+    public static void saveApplicationExtendConfig(OctoDomainOpObserver observer, String appCode,
+                                                   String configItem, String configValue, boolean deploy) throws Exception {
+        if (observer == null) throw new RuntimeException("observer must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+
+        try (IDao dao = IDaoService.newIDao()) {
+            Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+            if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+
+            setApplicationExtendConfig(applicationForm, configItem, configValue);
+            IFormMgr.get().updateForm(null, dao, applicationForm, observer);
+            if (deploy) {
+                IApplicationDeploy.get().deploy(Progress.newOutput(), dao, applicationForm, observer);
+            }
+            dao.commit();
+        }
+    }
+
+    public static void setApplicationExtendConfig(Form applicationForm, String configItem, String configValue) throws Exception {
+        if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
+        if (StrUtil.isBlank(configItem)) throw new RuntimeException("configItem must not be blank");
+
+        TableData tableData = applicationForm.getTable(ApplicationDeployDto.sViewSetting);
+        if (tableData == null) {
+            tableData = new TableData(ApplicationExtendConfigDto.FormModelId);
+            applicationForm.setAttrValue(ApplicationDeployDto.sViewSetting, tableData);
+        }
+
+        boolean found = false;
+        for (Form row : tableData.getRows()) {
+            if (!isApplicationExtendConfigRow(row, configItem)) continue;
+            row.setAttrValue(ApplicationExtendConfigDto.sValue, configValue);
+            found = true;
+        }
+        if (found) return;
+
+        String uuid = IdUtil.fastSimpleUUID();
+        Form row = new Form(ApplicationExtendConfigDto.FormModelId);
+        row.setUuid(uuid)
+                .setAttrValue(Form.Code, uuid)
+                .setAttrValue(ApplicationExtendConfigDto.sItem, configItem)
+                .setAttrValue(ApplicationExtendConfigDto.sValue, configValue);
+        tableData.add(row);
+    }
+
+    private static Form findApplicationExtendConfigRow(Form applicationForm, String configItem) throws Exception {
+        if (applicationForm == null || StrUtil.isBlank(configItem)) return null;
+        TableData tableData = applicationForm.getTable(ApplicationDeployDto.sViewSetting);
+        if (tableData == null || tableData.isEmtpy()) return null;
+
+        for (Form row : tableData.getRows()) {
+            if (isApplicationExtendConfigRow(row, configItem)) {
+                return row;
+            }
+        }
+
+        return null;
+    }
+
+    private static boolean isApplicationExtendConfigRow(Form row, String configItem) throws Exception {
+        return row != null && configItem.equals(row.getString(ApplicationExtendConfigDto.sItem));
+    }
 
 
     // 将视图发布到指定应用的菜单中
