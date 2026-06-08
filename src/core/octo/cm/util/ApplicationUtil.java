@@ -9,6 +9,7 @@ import cmn.anotation.ClassDeclare;
 import cmn.dto.Progress;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import fe.cmn.app.ability.PopToast;
 import fe.cmn.data.PairDto;
 import fe.cmn.editor.SelectEditorDto;
@@ -22,6 +23,7 @@ import gpf.dc.basic.fe.component.view.BaseFormView;
 import gpf.dc.basic.param.view.dto.ApplicationSetting;
 import gpf.dc.basic.util.GpfDCBasicConst;
 import octo.cm.constant.WorkBenchConst;
+import octo.cm.dto.app.IpWhitelistConfigDto;
 import octo.cm.exception.business.ApplicationException;
 import octo.cm.exception.business.PanelDesignException;
 import octocm.domain.observer.OctoDomainOpObserver;
@@ -52,6 +54,7 @@ public class ApplicationUtil {
     // 应用选择下拉框
     public static final String WIDGET_ID_APPLICATION_SELECT_EDITOR = "WIDGET_ID_APPLICATION_SELECT_EDITOR";
     public static final String FormModelId_Application = ApplicationDeployDto.FormModelId;
+    // 应用扩展配置中的 IP 白名单配置项，值按 JSON 字符串保存。
     public static final String EXT_CONFIG_IP_WHITELIST = "ipWhitelistConfig";
 
     // ========================= 默认应用方法 =========================
@@ -226,35 +229,74 @@ public class ApplicationUtil {
     // ========================= 支撑方法 =========================
 
 
-    // ========================= Application extend config =========================
+    // ========================= 应用扩展配置方法 =========================
+    // 扩展配置统一存放在应用表单的“扩展配置”嵌套表中：
+    // - 配置项：ApplicationExtendConfigDto.sItem
+    // - 配置值：ApplicationExtendConfigDto.sValue
+    // IP 白名单只是其中一个配置项，后续其他应用级配置可以复用这组通用方法。
 
-    public static String getIpWhitelistConfig(Form applicationForm) throws Exception {
-        return getApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST);
+    // 从已加载的应用表单中读取 IP 白名单配置，不访问数据库。
+    public static IpWhitelistConfigDto getIpWhitelistConfig(Form applicationForm) throws Exception {
+        return parseIpWhitelistConfig(getApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST));
     }
 
-    public static String getIpWhitelistConfig(IDao dao, String appCode) throws Exception {
-        return getApplicationExtendConfig(dao, appCode, EXT_CONFIG_IP_WHITELIST);
+    // 使用外部传入的 dao 查询应用表单并读取 IP 白名单配置，不负责提交事务。
+    public static IpWhitelistConfigDto getIpWhitelistConfig(IDao dao, String appCode) throws Exception {
+        return parseIpWhitelistConfig(getApplicationExtendConfig(dao, appCode, EXT_CONFIG_IP_WHITELIST));
     }
 
-    public static void setIpWhitelistConfig(Form applicationForm, String configValue) throws Exception {
-        setApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST, configValue);
+    // 仅修改传入的应用表单对象，不调用 updateForm，适合接入统一保存流程。
+    public static void setIpWhitelistConfig(Form applicationForm, IpWhitelistConfigDto config) throws Exception {
+        setApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST, toIpWhitelistConfigJson(config));
     }
 
+    // 使用外部传入的 dao 更新 IP 白名单配置，不 commit、不发布，由调用方控制事务边界。
     public static void updateIpWhitelistConfig(IDao dao, OctoDomainOpObserver observer, String appCode,
-                                               String configValue) throws Exception {
-        updateApplicationExtendConfig(dao, observer, appCode, EXT_CONFIG_IP_WHITELIST, configValue);
+                                               IpWhitelistConfigDto config) throws Exception {
+        updateApplicationExtendConfig(dao, observer, appCode, EXT_CONFIG_IP_WHITELIST, toIpWhitelistConfigJson(config));
     }
 
+    // 独立保存 IP 白名单配置：内部创建 dao、更新表单并 commit，默认不发布应用。
     public static void saveIpWhitelistConfig(OctoDomainOpObserver observer, String appCode,
-                                             String configValue) throws Exception {
-        saveIpWhitelistConfig(observer, appCode, configValue, false);
+                                             IpWhitelistConfigDto config) throws Exception {
+        saveIpWhitelistConfig(observer, appCode, config, false);
     }
 
+    // 独立保存 IP 白名单配置；deploy=true 时保存后立即发布应用。
     public static void saveIpWhitelistConfig(OctoDomainOpObserver observer, String appCode,
-                                             String configValue, boolean deploy) throws Exception {
-        saveApplicationExtendConfig(observer, appCode, EXT_CONFIG_IP_WHITELIST, configValue, deploy);
+                                             IpWhitelistConfigDto config, boolean deploy) throws Exception {
+        saveApplicationExtendConfig(observer, appCode, EXT_CONFIG_IP_WHITELIST, toIpWhitelistConfigJson(config), deploy);
     }
 
+    // 将 IP 白名单 DTO 转成扩展配置底层保存的 JSON 字符串。
+    private static String toIpWhitelistConfigJson(IpWhitelistConfigDto config) {
+        return JSONUtil.toJsonStr(normalizeIpWhitelistConfig(config));
+    }
+
+    // 将扩展配置底层保存的 JSON 字符串转成 IP 白名单 DTO。
+    private static IpWhitelistConfigDto parseIpWhitelistConfig(String configValue) {
+        if (StrUtil.isBlank(configValue)) return defaultIpWhitelistConfig();
+        try {
+            return normalizeIpWhitelistConfig(JSONUtil.toBean(configValue, IpWhitelistConfigDto.class));
+        } catch (Exception e) {
+            throw new IllegalArgumentException("IP白名单配置JSON格式非法", e);
+        }
+    }
+
+    private static IpWhitelistConfigDto normalizeIpWhitelistConfig(IpWhitelistConfigDto config) {
+        if (config == null) return defaultIpWhitelistConfig();
+        if (config.getEnabled() == null) config.setEnabled(false);
+        if (config.getItems() == null) config.setItems(new ArrayList<>());
+        return config;
+    }
+
+    private static IpWhitelistConfigDto defaultIpWhitelistConfig() {
+        return new IpWhitelistConfigDto()
+                .setEnabled(false)
+                .setItems(new ArrayList<>());
+    }
+
+    // 使用外部传入的 dao 查询应用表单并读取指定扩展配置，不负责事务提交。
     public static String getApplicationExtendConfig(IDao dao, String appCode, String configItem) throws Exception {
         if (dao == null) throw new RuntimeException("dao must not be null");
         if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
@@ -263,12 +305,14 @@ public class ApplicationUtil {
         return getApplicationExtendConfig(applicationForm, configItem);
     }
 
+    // 从已加载的应用表单中读取指定扩展配置，不访问数据库。
     public static String getApplicationExtendConfig(Form applicationForm, String configItem) throws Exception {
         Form configRow = findApplicationExtendConfigRow(applicationForm, configItem);
         if (configRow == null) return null;
         return configRow.getString(ApplicationExtendConfigDto.sValue);
     }
 
+    // 参与外部事务的更新方法：只执行 updateForm，不 commit、不发布。
     public static void updateApplicationExtendConfig(IDao dao, OctoDomainOpObserver observer, String appCode,
                                                      String configItem, String configValue) throws Exception {
         if (dao == null) throw new RuntimeException("dao must not be null");
@@ -281,11 +325,13 @@ public class ApplicationUtil {
         IFormMgr.get().updateForm(null, dao, applicationForm, observer);
     }
 
+    // 独立保存指定扩展配置：内部创建 dao、更新表单并 commit，默认不发布应用。
     public static void saveApplicationExtendConfig(OctoDomainOpObserver observer, String appCode,
                                                    String configItem, String configValue) throws Exception {
         saveApplicationExtendConfig(observer, appCode, configItem, configValue, false);
     }
 
+    // 独立保存指定扩展配置；deploy=true 时保存后立即发布应用。
     public static void saveApplicationExtendConfig(OctoDomainOpObserver observer, String appCode,
                                                    String configItem, String configValue, boolean deploy) throws Exception {
         if (observer == null) throw new RuntimeException("observer must not be null");
@@ -304,16 +350,19 @@ public class ApplicationUtil {
         }
     }
 
+    // 只修改内存中的应用表单：存在同名配置项则更新，不存在则新增一行扩展配置。
     public static void setApplicationExtendConfig(Form applicationForm, String configItem, String configValue) throws Exception {
         if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
         if (StrUtil.isBlank(configItem)) throw new RuntimeException("configItem must not be blank");
 
+        // 扩展配置表不存在时现场创建，避免调用方关心底层嵌套表结构。
         TableData tableData = applicationForm.getTable(ApplicationDeployDto.sViewSetting);
         if (tableData == null) {
             tableData = new TableData(ApplicationExtendConfigDto.FormModelId);
             applicationForm.setAttrValue(ApplicationDeployDto.sViewSetting, tableData);
         }
 
+        // 历史数据如果存在重复配置项，一并更新为同一个值，避免读取和保存结果不一致。
         boolean found = false;
         for (Form row : tableData.getRows()) {
             if (!isApplicationExtendConfigRow(row, configItem)) continue;
@@ -331,6 +380,7 @@ public class ApplicationUtil {
         tableData.add(row);
     }
 
+    // 在应用表单的扩展配置嵌套表中查找指定配置项。
     private static Form findApplicationExtendConfigRow(Form applicationForm, String configItem) throws Exception {
         if (applicationForm == null || StrUtil.isBlank(configItem)) return null;
         TableData tableData = applicationForm.getTable(ApplicationDeployDto.sViewSetting);
@@ -345,6 +395,7 @@ public class ApplicationUtil {
         return null;
     }
 
+    // 扩展配置按“配置项”字段匹配，配置值统一从“值”字段读取。
     private static boolean isApplicationExtendConfigRow(Form row, String configItem) throws Exception {
         return row != null && configItem.equals(row.getString(ApplicationExtendConfigDto.sItem));
     }
