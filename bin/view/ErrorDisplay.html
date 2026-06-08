@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>错误信息展示</title>
+
+    <script>
+        // ===== 配置变量区域 =====
+        const CONFIG = {
+            // 页面标题和文案
+            PAGE_TITLE: "系统错误报告",
+            PAGE_SUBTITLE: "错误详情列表",
+            MODAL_TITLE: "错误详细信息",
+            CLOSE_BUTTON_TEXT: "×",
+            ERROR_KEY_LABEL: "错误原因:",
+            ERROR_STACK_LABEL: "错误堆栈:",
+            TRUNCATE_LENGTH: 50,
+
+            // 事件模式控制
+            isEventMode: false,
+
+            // PostMessage 命令定义
+            MESSAGE_COMMANDS: {
+                VIEW_ERROR: "ViewErrorDetail",
+                CLOSE_MODAL: "CloseErrorModal"
+            }
+        };
+
+        // 错误数据 - 后端可替换此数组
+        let ERROR_DATA = {{jsondata}}
+
+        // const jsonData = `{{jsondata}}`;
+        // if (jsonData.indexOf("jsondata") === -1) {
+        //     ERROR_DATA = JSON.parse(jsonData);
+        // }
+
+        // PostMessage 通信方法
+        function sendMessage(cmd, params) {
+            const message = {
+                "JDFEmbedPageId": window.name,
+                "JDFEmbedPageMessage": {
+                    "cmd": cmd,
+                    "params": params
+                }
+            };
+            window.top.postMessage(message, '*');
+            console.log('[PostMessage]', message);
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('errorModal');
+            if (CONFIG.isEventMode) {
+                sendMessage(CONFIG.MESSAGE_COMMANDS.CLOSE_MODAL, {});
+            } else {
+                modal.style.display = 'none';
+            }
+        }
+    </script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f8fafc;
+            min-height: 100vh;
+            color: #1e293b;
+            line-height: 1.6;
+            font-size: 15px; /* Increased base font size slightly */
+        }
+
+        .container {
+            /*max-width: 1200px;*/
+            /*margin: 0 auto;*/
+            background: white;
+            min-height: 100vh;
+            box-shadow: 0 0 0 1px #e2e8f0;
+        }
+
+        .header {
+            background: #475569;
+            color: white;
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid #334155;
+        }
+
+        .header h1 {
+            font-size: 1.5rem; /* Increased header font size */
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            letter-spacing: -0.025em;
+        }
+
+        .header p {
+            font-size: 0.9375rem; /* Increased subtitle font size */
+            opacity: 0.9;
+            margin: 0;
+        }
+
+        .error-list {
+            background: white;
+        }
+
+        .error-item {
+            padding: 1.25rem 2rem;
+            border-bottom: 1px solid #f1f5f9;
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+            position: relative;
+        }
+
+        .error-item:last-child {
+            border-bottom: none;
+        }
+
+        .error-item:hover {
+            background: #f8fafc;
+        }
+
+        .error-item:hover::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            /*background: #3b82f6;*/
+        }
+
+        .error-content {
+            width: 100%;
+        }
+
+        .error-title {
+            font-size: 1rem; /* Increased error title font size */
+            font-weight: 500;
+            color: #0f172a;
+            margin-bottom: 0.5rem;
+            line-height: 1.4;
+        }
+
+        .error-preview {
+            color: #64748b;
+            font-size: 0.875rem; /* Increased preview text font size */
+            line-height: 1.5;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+        }
+
+        .error-index {
+            display: inline-block;
+            background: #f1f5f9;
+            color: #475569;
+            font-size: 0.75rem; /* Increased index font size */
+            padding: 0.125rem 0.375rem;
+            border-radius: 4px;
+            margin-right: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.025em;
+        }
+
+        /* Redesigned modal with cleaner styling */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-content {
+            background-color: white;
+            margin: 2% auto;
+            padding: 0;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 1000px;
+            max-height: 90vh;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            animation: modalSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-32px) scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        .modal-header {
+            background: #475569;
+            color: white;
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #334155;
+        }
+
+        .modal-header h2 {
+            font-size: 1.25rem; /* Increased modal title font size */
+            font-weight: 600;
+            letter-spacing: -0.025em;
+        }
+
+        .close {
+            background: transparent;
+            border: none;
+            color: white;
+            font-size: 1.25rem; /* Reduced close button font size to fit properly */
+            cursor: pointer;
+            padding: 0.5rem;
+            border-radius: 6px;
+            transition: background-color 0.15s ease;
+            width: 40px; /* Increased button size to accommodate text better */
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.8;
+            line-height: 1;
+        }
+
+        .close:hover {
+            background: rgba(255, 255, 255, 0.1);
+            opacity: 1;
+        }
+
+        .modal-body {
+            padding: 2rem;
+            max-height: 75vh;
+            overflow-y: auto;
+        }
+
+        .error-section {
+            margin-bottom: 2rem;
+        }
+
+        .error-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .error-label {
+            font-weight: 600;
+            color: #0f172a;
+            margin-bottom: 0.75rem;
+            font-size: 1rem; /* Increased label font size */
+            letter-spacing: -0.025em;
+        }
+
+        .error-content-display {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 1.25rem;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+            font-size: 0.875rem; /* Increased content display font size */
+            line-height: 1.6;
+            color: #334155;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .stack-trace {
+            background: #0f172a;
+            color: #e2e8f0;
+            border-color: #1e293b;
+        }
+
+        /* Improved responsive design */
+        @media (max-width: 768px) {
+            .header {
+                padding: 1.25rem 1.5rem;
+            }
+
+            .header h1 {
+                font-size: 1.375rem; /* Increased mobile header font size */
+            }
+
+            .error-item {
+                padding: 1rem 1.5rem;
+            }
+
+            .modal-content {
+                width: 95%;
+                margin: 5% auto;
+                border-radius: 8px;
+            }
+
+            .modal-header {
+                padding: 1.25rem 1.5rem;
+            }
+
+            .modal-body {
+                padding: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1 id="pageTitle">系统错误报告</h1>
+        <p id="pageSubtitle">错误详情列表</p>
+    </div>
+
+    <div class="error-list" id="errorList">
+        错误列表将通过 JavaScript 动态生成
+    </div>
+</div>
+
+<!-- Modal -->
+<div id="errorModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 id="modalTitle">错误详细信息</h2>
+            <button class="close" id="closeModal">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="error-section">
+                <div class="error-label" id="errorKeyLabel">错误原因:</div>
+                <div class="error-content-display" id="modalErrorKey"></div>
+            </div>
+            <div class="error-section">
+                <div class="error-label" id="errorStackLabel">错误堆栈:</div>
+                <div class="error-content-display stack-trace" id="modalErrorStack"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 初始化页面
+    document.addEventListener('DOMContentLoaded', function () {
+        // 设置页面标题
+        document.getElementById('pageTitle').textContent = CONFIG.PAGE_TITLE;
+        document.getElementById('pageSubtitle').textContent = CONFIG.PAGE_SUBTITLE;
+        document.getElementById('modalTitle').textContent = CONFIG.MODAL_TITLE;
+        document.getElementById('closeModal').textContent = CONFIG.CLOSE_BUTTON_TEXT;
+        document.getElementById('errorKeyLabel').textContent = CONFIG.ERROR_KEY_LABEL;
+        document.getElementById('errorStackLabel').textContent = CONFIG.ERROR_STACK_LABEL;
+
+        // 渲染错误列表
+        renderErrorList();
+
+        // 绑定模态框事件
+        bindModalEvents();
+    });
+
+    function renderErrorList() {
+        const errorList = document.getElementById('errorList');
+        errorList.innerHTML = '';
+
+        ERROR_DATA.forEach((error, index) => {
+            const errorItem = document.createElement('div');
+            errorItem.className = 'error-item';
+            errorItem.setAttribute('data-index', index);
+
+            const truncatedStack = error.errorStack.length > CONFIG.TRUNCATE_LENGTH
+                ? error.errorStack.substring(0, CONFIG.TRUNCATE_LENGTH) + '...'
+                : error.errorStack;
+
+            errorItem.innerHTML = `
+                    <div class="error-content">
+                        <div class="error-title">
+                            <span class="error-index">#${index + 1}</span>
+                            ${error.errorKey}
+                        </div>
+                        <div class="error-preview">${truncatedStack}</div>
+                    </div>
+                `;
+
+            errorItem.addEventListener('click', function () {
+                showErrorDetail(index);
+            });
+
+            errorList.appendChild(errorItem);
+        });
+    }
+
+    // 显示错误详情
+    function showErrorDetail(index) {
+        const error = ERROR_DATA[index];
+
+        if (CONFIG.isEventMode) {
+            // 事件模式：发送消息给父窗口
+            sendMessage(CONFIG.MESSAGE_COMMANDS.VIEW_ERROR, {
+                index: index,
+                errorKey: error.errorKey,
+                errorStack: error.errorStack
+            });
+        } else {
+            // 默认模式：显示模态框
+            document.getElementById('modalErrorKey').textContent = error.errorKey;
+            document.getElementById('modalErrorStack').textContent = error.errorStack;
+            document.getElementById('errorModal').style.display = 'block';
+        }
+    }
+
+    // 绑定模态框事件
+    function bindModalEvents() {
+        const modal = document.getElementById('errorModal');
+        const closeBtn = document.getElementById('closeModal');
+
+        closeBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            closeModal();
+        });
+
+        // 点击模态框外部关闭
+        modal.addEventListener('click', function (event) {
+            if (event.target === modal) {
+                closeModal();
+            }
+        });
+
+        // ESC键关闭
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape' && modal.style.display === 'block') {
+                closeModal();
+            }
+        });
+    }
+</script>
+</body>
+</html>

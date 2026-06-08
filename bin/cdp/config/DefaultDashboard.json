@@ -1,0 +1,7 @@
+{
+  "pageId": "工作台",
+  "pageName": "工作台",
+  "component": {
+    "type": "DefaultDashboard"
+  }
+}
