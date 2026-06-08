@@ -9,7 +9,6 @@ import cmn.anotation.ClassDeclare;
 import cmn.dto.Progress;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import fe.cmn.app.ability.PopToast;
@@ -275,8 +274,9 @@ public class ApplicationUtil {
      * 将IP白名单配置作为顶层字段暴露给应用配置JSON。
      * <p>
      * IP白名单底层仍存放在应用扩展配置表中，但配置页面不需要感知这层结构。
-     * 为避免同一份数据在返回JSON中出现两次，该方法会从扩展配置表JSON中剔除
-     * {@code ipWhitelistConfig} 对应的内部行，只保留顶层字段。
+     * 为兼容现有应用配置页面和统一表单保存流程，该方法不会移除扩展配置表中的
+     * {@code ipWhitelistConfig} 内部行；保存时由 {@link #takeIpWhitelistConfig(JSONObject)}
+     * 和 {@link #setIpWhitelistConfig(Form, IpWhitelistConfigDto)} 统一规范化最终写入值。
      *
      * @param appConfig       应用配置JSON
      * @param applicationForm 已加载的应用表单
@@ -285,7 +285,6 @@ public class ApplicationUtil {
     public static void exposeIpWhitelistConfig(JSONObject appConfig, Form applicationForm) throws Exception {
         if (appConfig == null || applicationForm == null) return;
         appConfig.set(EXT_CONFIG_IP_WHITELIST, getIpWhitelistConfig(applicationForm));
-        removeApplicationExtendConfigItem(appConfig, EXT_CONFIG_IP_WHITELIST);
     }
 
     /**
@@ -591,45 +590,6 @@ public class ApplicationUtil {
     private static boolean isApplicationExtendConfigRow(Form row, String configItem) throws Exception {
         return row != null && configItem.equals(row.getString(ApplicationExtendConfigDto.sItem));
     }
-
-    /**
-     * 从应用扩展配置JSON数组中移除指定配置项。
-     *
-     * @param appConfig  应用配置JSON
-     * @param configItem 需要移除的扩展配置项
-     */
-    private static void removeApplicationExtendConfigItem(JSONObject appConfig, String configItem) {
-        if (appConfig == null || StrUtil.isBlank(configItem)) return;
-
-        Object extendConfigValue = appConfig.get(ApplicationDeployDto.sViewSetting);
-        if (!(extendConfigValue instanceof JSONArray)) return;
-
-        JSONArray extendConfigs = (JSONArray) extendConfigValue;
-        for (int i = extendConfigs.size() - 1; i >= 0; i--) {
-            Object rowValue = extendConfigs.get(i);
-            if (!(rowValue instanceof JSONObject)) continue;
-
-            JSONObject row = (JSONObject) rowValue;
-            if (isApplicationExtendConfigJsonRow(row, configItem)) {
-                extendConfigs.remove(i);
-            }
-        }
-        if (extendConfigs.isEmpty()) {
-            appConfig.remove(ApplicationDeployDto.sViewSetting);
-        }
-    }
-
-    /**
-     * 判断扩展配置JSON行是否为指定配置项。
-     *
-     * @param row        扩展配置行JSON
-     * @param configItem 配置项名称
-     * @return 匹配时返回 true
-     */
-    private static boolean isApplicationExtendConfigJsonRow(JSONObject row, String configItem) {
-        return row != null && configItem.equals(row.getStr(ApplicationExtendConfigDto.sItem));
-    }
-
 
     // 将视图发布到指定应用的菜单中
     public static void removeMenuItemByPanelCode(OctoDomainOpObserver observer, String applicationCode, String panelCode) throws Exception {
