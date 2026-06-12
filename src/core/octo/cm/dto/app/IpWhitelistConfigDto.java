@@ -7,7 +7,8 @@ import java.util.List;
 /**
  * 应用级IP白名单配置。
  * <p>
- * 该配置由应用扩展配置项 {@code ipWhitelistConfig} 保存。
+ * 该DTO用于工具API的输入输出转换；底层保存到应用扩展配置中的
+ * {@code 启用IP白名单访问控制} 与 {@code IP访问白名单} 两个标准 AppViewSetting 项。
  */
 public class IpWhitelistConfigDto implements Serializable {
     /**

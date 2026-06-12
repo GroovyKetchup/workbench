@@ -23,7 +23,9 @@ import gpf.adur.data.ResultSet;
 import gpf.adur.data.TableData;
 import gpf.dc.basic.fe.component.view.BaseFormView;
 import gpf.dc.basic.param.view.dto.ApplicationSetting;
+import gpf.dc.basic.param.view.dto.SettingItemDto;
 import gpf.dc.basic.util.GpfDCBasicConst;
+import gpf.dc.basic.util.GpfDCBasicUtil;
 import octo.cm.constant.WorkBenchConst;
 import octo.cm.dto.app.IpWhitelistConfigDto;
 import octo.cm.exception.business.ApplicationException;
@@ -36,7 +38,9 @@ import org.nutz.dao.Cnd;
 import org.nutz.dao.entity.annotation.Comment;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Comment("面板设计工具类")
 @ClassDeclare(
@@ -57,9 +61,24 @@ public class ApplicationUtil {
     public static final String WIDGET_ID_APPLICATION_SELECT_EDITOR = "WIDGET_ID_APPLICATION_SELECT_EDITOR";
     public static final String FormModelId_Application = ApplicationDeployDto.FormModelId;
     /**
-     * 应用扩展配置中的IP白名单配置项，值按JSON字符串保存。
+     * 对外兼容使用的IP白名单配置字段名。
+     * <p>
+     * 应用表单底层不再写入名为 {@code ipWhitelistConfig} 的自定义扩展配置项，
+     * 而是写入平台 AppViewSetting 已支持的两个标准配置项。
      */
     public static final String EXT_CONFIG_IP_WHITELIST = "ipWhitelistConfig";
+    /**
+     * 发布态 AppViewSetting 中的IP白名单启用字段名。
+     */
+    public static final String APP_VIEW_SETTING_ENABLE_IP_WHITELIST_KEY = "enableIpWhitelistAccessControl";
+    /**
+     * 发布态 AppViewSetting 中的IP白名单文本字段名。
+     */
+    public static final String APP_VIEW_SETTING_IP_ACCESS_WHITELIST_KEY = "ipAccessWhitelist";
+    /**
+     * AppViewSetting 配置项标签缓存，避免每次读写IP白名单配置都重新读取资源JSON。
+     */
+    private static volatile Map<String, String> appViewSettingLabelCache;
 
     // ========================= 默认应用方法 =========================
     // 获取或弹出框让用户设置默认应用
@@ -243,7 +262,20 @@ public class ApplicationUtil {
      * @throws Exception 读取扩展配置失败时抛出
      */
     public static IpWhitelistConfigDto getIpWhitelistConfig(Form applicationForm) throws Exception {
-        return parseIpWhitelistConfig(getApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST));
+        String enabledLabel = getAppViewSettingLabel(APP_VIEW_SETTING_ENABLE_IP_WHITELIST_KEY);
+        String whitelistLabel = getAppViewSettingLabel(APP_VIEW_SETTING_IP_ACCESS_WHITELIST_KEY);
+        String enabledValue = getApplicationExtendConfig(applicationForm, enabledLabel);
+        String whitelistValue = getApplicationExtendConfig(applicationForm, whitelistLabel);
+
+        // 兼容早期测试数据：旧实现曾把整个DTO保存到 ipWhitelistConfig 自定义行。
+        if (StrUtil.isBlank(enabledValue) && StrUtil.isBlank(whitelistValue)) {
+            String legacyValue = getApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST);
+            if (StrUtil.isNotBlank(legacyValue)) return parseIpWhitelistConfig(legacyValue);
+        }
+
+        return normalizeIpWhitelistConfig(new IpWhitelistConfigDto()
+                .setEnabled(parseBooleanConfigValue(enabledValue))
+                .setItems(parseIpAccessWhitelistItems(whitelistValue)));
     }
 
     /**
@@ -255,7 +287,11 @@ public class ApplicationUtil {
      * @throws Exception 查询或解析失败时抛出
      */
     public static IpWhitelistConfigDto getIpWhitelistConfig(IDao dao, String appCode) throws Exception {
-        return parseIpWhitelistConfig(getApplicationExtendConfig(dao, appCode, EXT_CONFIG_IP_WHITELIST));
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+        Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+        if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+        return getIpWhitelistConfig(applicationForm);
     }
 
     /**
@@ -268,17 +304,20 @@ public class ApplicationUtil {
      * @throws Exception 写入扩展配置失败时抛出
      */
     public static void setIpWhitelistConfig(Form applicationForm, IpWhitelistConfigDto config) throws Exception {
-        setApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST, toIpWhitelistConfigJson(config));
+        IpWhitelistConfigDto normalizedConfig = normalizeIpWhitelistConfig(config);
+        setApplicationExtendConfig(applicationForm, getAppViewSettingLabel(APP_VIEW_SETTING_ENABLE_IP_WHITELIST_KEY),
+                Boolean.TRUE.equals(normalizedConfig.getEnabled()) ? "true" : "false");
+        setApplicationExtendConfig(applicationForm, getAppViewSettingLabel(APP_VIEW_SETTING_IP_ACCESS_WHITELIST_KEY),
+                toIpAccessWhitelistText(normalizedConfig.getItems()));
+        removeApplicationExtendConfig(applicationForm, EXT_CONFIG_IP_WHITELIST);
     }
 
     /**
      * 将IP白名单配置作为顶层字段暴露给应用配置JSON。
      * <p>
-     * IP白名单底层仍存放在应用扩展配置表中，但配置页面不需要感知这层结构。
-     * 为避免前端收到两份同义数据，该方法会从返回JSON的扩展配置表中移除
-     * {@code ipWhitelistConfig} 内部行，只保留顶层字段；保存时由
-     * {@link #takeIpWhitelistConfig(JSONObject)} 和
-     * {@link #setIpWhitelistConfig(Form, IpWhitelistConfigDto)} 转回底层扩展配置结构。
+     * 该方法仅用于兼容旧调用方。MultiAgent 应用配置接口应直接透传“扩展配置”，
+     * 由前端维护 {@link #APP_VIEW_SETTING_ENABLE_IP_WHITELIST_KEY} 和
+     * {@link #APP_VIEW_SETTING_IP_ACCESS_WHITELIST_KEY} 对应的两个标准 AppViewSetting 项。
      *
      * @param appConfig       应用配置JSON
      * @param applicationForm 已加载的应用表单
@@ -293,8 +332,8 @@ public class ApplicationUtil {
     /**
      * 从应用配置JSON中取出顶层IP白名单配置，并将该字段从JSON中移除。
      * <p>
-     * {@code ipWhitelistConfig} 不是应用表单模型字段，调用方应在通用表单转换前调用本方法，
-     * 再通过 {@link #setIpWhitelistConfig(Form, IpWhitelistConfigDto)} 写入同一个Form的扩展配置结构。
+     * {@code ipWhitelistConfig} 不是应用表单模型字段；新调用方应优先直接维护
+     * “扩展配置”中的标准 AppViewSetting 项。
      *
      * @param jsonObject 应用配置JSON
      * @return 入参未携带该字段时返回 null，表示保留原有IP白名单配置
@@ -319,7 +358,14 @@ public class ApplicationUtil {
      */
     public static void updateIpWhitelistConfig(IDao dao, OctoDomainOpObserver observer, String appCode,
                                                IpWhitelistConfigDto config) throws Exception {
-        updateApplicationExtendConfig(dao, observer, appCode, EXT_CONFIG_IP_WHITELIST, toIpWhitelistConfigJson(config));
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (observer == null) throw new RuntimeException("observer must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+        Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+        if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+
+        setIpWhitelistConfig(applicationForm, config);
+        IFormMgr.get().updateForm(null, dao, applicationForm, observer);
     }
 
     /**
@@ -348,17 +394,86 @@ public class ApplicationUtil {
      */
     public static void saveIpWhitelistConfig(OctoDomainOpObserver observer, String appCode,
                                              IpWhitelistConfigDto config, boolean deploy) throws Exception {
-        saveApplicationExtendConfig(observer, appCode, EXT_CONFIG_IP_WHITELIST, toIpWhitelistConfigJson(config), deploy);
+        if (observer == null) throw new RuntimeException("observer must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+
+        try (IDao dao = IDaoService.newIDao()) {
+            Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+            if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+
+            setIpWhitelistConfig(applicationForm, config);
+            IFormMgr.get().updateForm(null, dao, applicationForm, observer);
+            if (deploy) {
+                IApplicationDeploy.get().deploy(Progress.newOutput(), dao, applicationForm, observer);
+            }
+            dao.commit();
+        }
     }
 
     /**
-     * 将IP白名单DTO转成扩展配置底层保存的JSON字符串。
+     * 将白名单规则列表转成 AppViewSetting 文本值。
      *
-     * @param config IP白名单配置
-     * @return JSON字符串
+     * @param items 白名单规则列表
+     * @return 以换行分隔的白名单文本
      */
-    private static String toIpWhitelistConfigJson(IpWhitelistConfigDto config) {
-        return JSONUtil.toJsonStr(normalizeIpWhitelistConfig(config));
+    private static String toIpAccessWhitelistText(List<String> items) {
+        if (items == null || items.isEmpty()) return "";
+
+        List<String> normalizedItems = new ArrayList<>();
+        for (String item : items) {
+            if (StrUtil.isBlank(item)) continue;
+            normalizedItems.add(item.trim());
+        }
+        return String.join("\n", normalizedItems);
+    }
+
+    /**
+     * 根据 AppViewSetting 字段名获取应用表单扩展配置中使用的中文配置项。
+     * <p>
+     * 配置项清单由底层 {@code resource/ApplicationSetting.json} 提供，
+     * 本方法首次调用时读取并缓存，后续不再重复解析资源文件。
+     *
+     * @param settingKey AppViewSetting 字段名
+     * @return 应用表单扩展配置中的配置项名称
+     * @throws Exception 配置项不存在时抛出
+     */
+    private static String getAppViewSettingLabel(String settingKey) throws Exception {
+        if (StrUtil.isBlank(settingKey)) throw new RuntimeException("settingKey must not be blank");
+
+        Map<String, String> labelMap = appViewSettingLabelCache;
+        if (labelMap == null) {
+            synchronized (ApplicationUtil.class) {
+                labelMap = appViewSettingLabelCache;
+                if (labelMap == null) {
+                    labelMap = buildAppViewSettingLabelMap();
+                    appViewSettingLabelCache = labelMap;
+                }
+            }
+        }
+
+        String label = labelMap.get(settingKey);
+        if (StrUtil.isBlank(label)) {
+            throw new RuntimeException(StrUtil.format("应用扩展配置项[{}]不存在", settingKey));
+        }
+        return label;
+    }
+
+    /**
+     * 从底层应用视图设置项定义中构建字段名到配置项名称的映射。
+     *
+     * @return AppViewSetting 字段名到配置项名称的映射
+     * @throws Exception 读取底层设置项失败时抛出
+     */
+    private static Map<String, String> buildAppViewSettingLabelMap() throws Exception {
+        Map<String, String> labelMap = new HashMap<>();
+        List<SettingItemDto> settingItems = GpfDCBasicUtil.getAppViewSettingItems();
+        if (settingItems == null) return labelMap;
+
+        for (SettingItemDto settingItem : settingItems) {
+            if (settingItem == null || StrUtil.isBlank(settingItem.getValue())) continue;
+            labelMap.put(settingItem.getValue(), settingItem.getLabel());
+        }
+        return labelMap;
     }
 
     /**
@@ -398,6 +513,41 @@ public class ApplicationUtil {
     }
 
     /**
+     * 将 AppViewSetting 中的白名单文本拆成规则列表。
+     *
+     * @param whitelistText 白名单文本
+     * @return 白名单规则列表
+     */
+    private static List<String> parseIpAccessWhitelistItems(String whitelistText) {
+        List<String> items = new ArrayList<>();
+        if (StrUtil.isBlank(whitelistText)) return items;
+
+        String[] parts = whitelistText.split("[\\r\\n,;，；]+");
+        for (String part : parts) {
+            if (StrUtil.isBlank(part)) continue;
+            items.add(part.trim());
+        }
+        return items;
+    }
+
+    /**
+     * 解析布尔配置值，兼容平台下拉值和中文显示值。
+     *
+     * @param value 布尔配置文本
+     * @return true 表示启用
+     */
+    private static Boolean parseBooleanConfigValue(String value) {
+        if (StrUtil.isBlank(value)) return false;
+
+        String text = value.trim();
+        return "true".equalsIgnoreCase(text)
+                || "1".equals(text)
+                || "yes".equalsIgnoreCase(text)
+                || "y".equalsIgnoreCase(text)
+                || "是".equals(text);
+    }
+
+    /**
      * 规范化IP白名单配置，补齐默认值。
      *
      * @param config 原始配置
@@ -406,7 +556,16 @@ public class ApplicationUtil {
     private static IpWhitelistConfigDto normalizeIpWhitelistConfig(IpWhitelistConfigDto config) {
         if (config == null) return defaultIpWhitelistConfig();
         if (config.getEnabled() == null) config.setEnabled(false);
-        if (config.getItems() == null) config.setItems(new ArrayList<>());
+        if (config.getItems() == null) {
+            config.setItems(new ArrayList<>());
+        } else {
+            List<String> normalizedItems = new ArrayList<>();
+            for (String item : config.getItems()) {
+                if (StrUtil.isBlank(item)) continue;
+                normalizedItems.add(item.trim());
+            }
+            config.setItems(normalizedItems);
+        }
         return config;
     }
 
@@ -558,6 +717,27 @@ public class ApplicationUtil {
                 .setAttrValue(ApplicationExtendConfigDto.sItem, configItem)
                 .setAttrValue(ApplicationExtendConfigDto.sValue, configValue);
         tableData.add(row);
+    }
+
+    /**
+     * 从内存中的应用表单扩展配置中移除指定配置项。
+     *
+     * @param applicationForm 应用表单
+     * @param configItem      配置项名称
+     * @throws Exception 读取配置行失败时抛出
+     */
+    private static void removeApplicationExtendConfig(Form applicationForm, String configItem) throws Exception {
+        if (applicationForm == null || StrUtil.isBlank(configItem)) return;
+
+        TableData tableData = applicationForm.getTable(ApplicationDeployDto.sViewSetting);
+        if (tableData == null || tableData.isEmtpy()) return;
+
+        List<Form> rows = new ArrayList<>(tableData.getRows());
+        for (Form row : rows) {
+            if (isApplicationExtendConfigRow(row, configItem)) {
+                tableData.delete(row);
+            }
+        }
     }
 
     /**
