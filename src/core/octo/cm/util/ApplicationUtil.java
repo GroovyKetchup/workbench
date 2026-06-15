@@ -18,6 +18,7 @@ import fe.cmn.editor.SelectEditorDto;
 import fe.cmn.panel.*;
 import fe.cmn.panel.ability.PopDialog;
 import fe.cmn.widget.WidgetDto;
+import gpf.adur.data.AssociationData;
 import gpf.adur.data.Form;
 import gpf.adur.data.ResultSet;
 import gpf.adur.data.TableData;
@@ -27,20 +28,30 @@ import gpf.dc.basic.param.view.dto.SettingItemDto;
 import gpf.dc.basic.util.GpfDCBasicConst;
 import gpf.dc.basic.util.GpfDCBasicUtil;
 import octo.cm.constant.WorkBenchConst;
+import octo.cm.dto.app.GlobalEventDefinitionRecordDto;
+import octo.cm.dto.app.GlobalEventDefinitionsDto;
 import octo.cm.dto.app.IpWhitelistConfigDto;
 import octo.cm.exception.business.ApplicationException;
 import octo.cm.exception.business.PanelDesignException;
 import octocm.domain.observer.OctoDomainOpObserver;
+import octocm.workbench.consts.OctoCM2WorkBenchConst;
 import octocm.workbench.dto.app.ApplicationDeployDto;
 import octocm.workbench.dto.app.ApplicationExtendConfigDto;
 import octocm.workbench.dto.app.ApplicationMenuDto;
 import org.nutz.dao.Cnd;
 import org.nutz.dao.entity.annotation.Comment;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 @Comment("面板设计工具类")
 @ClassDeclare(
@@ -60,6 +71,9 @@ public class ApplicationUtil {
     // 应用选择下拉框
     public static final String WIDGET_ID_APPLICATION_SELECT_EDITOR = "WIDGET_ID_APPLICATION_SELECT_EDITOR";
     public static final String FormModelId_Application = ApplicationDeployDto.FormModelId;
+    public static final String APP_GLOBAL_EVENT_DESC = ApplicationDeployDto.sAppEvent;
+    public static final String APP_GLOBAL_EVENT_CODE_PREFIX = "APP_EVT_";
+    public static final int APP_GLOBAL_EVENT_CODE_LENGTH = 5;
     /**
      * 对外兼容使用的IP白名单配置字段名。
      * <p>
@@ -251,6 +265,300 @@ public class ApplicationUtil {
 
     // ========================= 支撑方法 =========================
 
+
+    // ========================= Application global event definitions =========================
+
+    public static GlobalEventDefinitionsDto getGlobalEventDefinitions(IDao dao, String appCode) throws Exception {
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+        Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+        if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+        return getGlobalEventDefinitions(dao, applicationForm);
+    }
+
+    public static GlobalEventDefinitionsDto getGlobalEventDefinitions(IDao dao, Form applicationForm) throws Exception {
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
+        return buildGlobalEventDefinitionsDto(applicationForm.getUuid(),
+                queryAppGlobalEventForms(dao, applicationForm.getUuid()));
+    }
+
+    public static GlobalEventDefinitionsDto updateGlobalEventDefinitions(IDao dao, OctoDomainOpObserver observer,
+                                                                         String appCode, String baseRevision,
+                                                                         List<GlobalEventDefinitionRecordDto> events)
+            throws Exception {
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
+        Form applicationForm = queryApplicationFormByAppCode(dao, appCode);
+        if (applicationForm == null) throw ApplicationException.Builder.notFoundWithCode(appCode);
+        return updateGlobalEventDefinitions(dao, observer, applicationForm, baseRevision, events);
+    }
+
+    public static GlobalEventDefinitionsDto updateGlobalEventDefinitions(IDao dao, OctoDomainOpObserver observer,
+                                                                         Form applicationForm, String baseRevision,
+                                                                         List<GlobalEventDefinitionRecordDto> events)
+            throws Exception {
+        if (dao == null) throw new RuntimeException("dao must not be null");
+        if (observer == null) throw new RuntimeException("observer must not be null");
+        if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
+        if (StrUtil.isBlank(applicationForm.getUuid())) throw new RuntimeException("applicationForm uuid must not be blank");
+
+        List<Form> currentEventForms = queryAppGlobalEventForms(dao, applicationForm.getUuid());
+        GlobalEventDefinitionsDto current = buildGlobalEventDefinitionsDto(applicationForm.getUuid(), currentEventForms);
+        if (!Objects.equals(baseRevision, current.getRevision())) {
+            throw new GlobalEventDefinitionsConflictException(current);
+        }
+
+        List<GlobalEventDefinitionRecordDto> normalizedEvents = normalizeGlobalEventRecords(events);
+        Map<String, Form> existedEventByName = indexGlobalEventFormsByName(currentEventForms);
+        int nextCodeNumber = findMaxAppGlobalEventCodeNumber(currentEventForms) + 1;
+
+        List<Form> savedForms = new ArrayList<>();
+        Set<String> keepUuids = new LinkedHashSet<>();
+        for (GlobalEventDefinitionRecordDto event : normalizedEvents) {
+            Form eventForm = existedEventByName.get(event.getEventName());
+            boolean create = eventForm == null;
+            if (create) {
+                eventForm = Op.newForm(OctoCM2WorkBenchConst.ModelId_面板事件);
+                eventForm.setAttrValue(OctoCM2WorkBenchConst.面板事件构面_事件编号,
+                        formatAppGlobalEventCode(nextCodeNumber++));
+            } else if (StrUtil.isBlank(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_事件编号))) {
+                eventForm.setAttrValue(OctoCM2WorkBenchConst.面板事件构面_事件编号,
+                        formatAppGlobalEventCode(nextCodeNumber++));
+            }
+
+            fillAppGlobalEventForm(applicationForm.getUuid(), eventForm, event);
+            Form savedForm = create
+                    ? IFormMgr.get().createForm(null, dao, eventForm, observer)
+                    : IFormMgr.get().updateForm(null, dao, eventForm, observer);
+            savedForms.add(savedForm);
+            keepUuids.add(savedForm.getUuid());
+        }
+
+        rewriteApplicationGlobalEventReferences(dao, observer, applicationForm, savedForms);
+        cleanupResidualAppGlobalEventForms(dao, currentEventForms, keepUuids);
+
+        return getGlobalEventDefinitions(dao, applicationForm);
+    }
+
+    public static class GlobalEventDefinitionsConflictException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        private final GlobalEventDefinitionsDto latest;
+
+        public GlobalEventDefinitionsConflictException(GlobalEventDefinitionsDto latest) {
+            super("Global event definitions were changed by another client. Please refresh and retry.");
+            this.latest = latest;
+        }
+
+        public GlobalEventDefinitionsDto getLatest() {
+            return latest;
+        }
+    }
+
+    private static List<GlobalEventDefinitionRecordDto> normalizeGlobalEventRecords(
+            List<GlobalEventDefinitionRecordDto> events) {
+        List<GlobalEventDefinitionRecordDto> normalized = new ArrayList<>();
+        if (events == null || events.isEmpty()) return normalized;
+
+        Set<String> eventNames = new LinkedHashSet<>();
+        for (GlobalEventDefinitionRecordDto event : events) {
+            if (event == null) continue;
+            String eventName = trim(event.getEventName());
+            String definitionJson = trim(event.getDefinitionJson());
+            if (StrUtil.isBlank(eventName)) throw new IllegalArgumentException("eventName must not be blank");
+            if (!eventNames.add(eventName)) {
+                throw new IllegalArgumentException(StrUtil.format("Duplicate global event name: {}", eventName));
+            }
+            validateGlobalEventDefinitionJson(definitionJson);
+            normalized.add(new GlobalEventDefinitionRecordDto()
+                    .setEventName(eventName)
+                    .setDefinitionJson(definitionJson));
+        }
+        return normalized;
+    }
+
+    private static void validateGlobalEventDefinitionJson(String definitionJson) {
+        if (StrUtil.isBlank(definitionJson)) throw new IllegalArgumentException("definitionJson must not be blank");
+        try {
+            String text = definitionJson.trim();
+            if (text.startsWith("[")) {
+                JSONUtil.parseArray(text);
+            } else {
+                JSONUtil.parseObj(text);
+            }
+        } catch (Exception e) {
+            throw new IllegalArgumentException("definitionJson must be valid JSON", e);
+        }
+    }
+
+    private static List<Form> queryAppGlobalEventForms(IDao dao, String ownerUuid) throws Exception {
+        if (StrUtil.isBlank(ownerUuid)) return new ArrayList<>();
+
+        Cnd cnd = Cnd.NEW();
+        cnd.where()
+                .andEquals(Form.Owner, ownerUuid)
+                .andEquals(Op.getFieldCode(OctoCM2WorkBenchConst.面板事件构面_事件说明), APP_GLOBAL_EVENT_DESC);
+        cnd.orderBy(Op.getFieldCode(OctoCM2WorkBenchConst.面板事件构面_事件编号), "asc");
+
+        ResultSet<Form> resultSet = IFormMgr.get().queryFormPage(dao,
+                OctoCM2WorkBenchConst.ModelId_面板事件, cnd, 1, Integer.MAX_VALUE, true, true);
+        if (resultSet == null || resultSet.isEmpty()) return new ArrayList<>();
+
+        List<Form> dataList = resultSet.getDataList();
+        if (dataList == null || dataList.isEmpty()) return new ArrayList<>();
+
+        List<Form> eventForms = new ArrayList<>(dataList);
+        eventForms.sort(Comparator
+                .comparing((Form form) -> getFormStringQuietly(form, OctoCM2WorkBenchConst.面板事件构面_事件编号))
+                .thenComparing(form -> getFormStringQuietly(form, OctoCM2WorkBenchConst.面板事件构面_事件名称)));
+        return eventForms;
+    }
+
+    private static GlobalEventDefinitionsDto buildGlobalEventDefinitionsDto(String ownerUuid, List<Form> eventForms)
+            throws Exception {
+        List<GlobalEventDefinitionRecordDto> records = new ArrayList<>();
+        if (eventForms != null) {
+            for (Form eventForm : eventForms) {
+                GlobalEventDefinitionRecordDto record = toGlobalEventDefinitionRecord(eventForm);
+                if (record == null) continue;
+                records.add(record);
+            }
+        }
+
+        return new GlobalEventDefinitionsDto()
+                .setRevision(buildGlobalEventRevision(ownerUuid, records))
+                .setEvents(records);
+    }
+
+    private static GlobalEventDefinitionRecordDto toGlobalEventDefinitionRecord(Form eventForm) throws Exception {
+        if (eventForm == null) return null;
+        String eventName = trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_事件名称));
+        if (StrUtil.isBlank(eventName)) return null;
+        return new GlobalEventDefinitionRecordDto()
+                .setEventCode(trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_事件编号)))
+                .setEventName(eventName)
+                .setDefinitionJson(trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_动作说明)));
+    }
+
+    private static String buildGlobalEventRevision(String ownerUuid, List<GlobalEventDefinitionRecordDto> records)
+            throws Exception {
+        List<GlobalEventDefinitionRecordDto> sortedRecords = new ArrayList<>();
+        if (records != null) sortedRecords.addAll(records);
+        sortedRecords.sort(Comparator
+                .comparing((GlobalEventDefinitionRecordDto record) -> safeText(record.getEventCode()))
+                .thenComparing(record -> safeText(record.getEventName()))
+                .thenComparing(record -> safeText(record.getDefinitionJson())));
+
+        StringBuilder builder = new StringBuilder();
+        builder.append(safeText(ownerUuid)).append('\n');
+        for (GlobalEventDefinitionRecordDto record : sortedRecords) {
+            builder.append(safeText(record.getEventCode())).append('\t')
+                    .append(safeText(record.getEventName())).append('\t')
+                    .append(safeText(record.getDefinitionJson())).append('\n');
+        }
+
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] hash = digest.digest(builder.toString().getBytes(StandardCharsets.UTF_8));
+        StringBuilder revision = new StringBuilder();
+        for (byte b : hash) {
+            revision.append(String.format("%02x", b & 0xff));
+        }
+        return revision.toString();
+    }
+
+    private static Map<String, Form> indexGlobalEventFormsByName(List<Form> eventForms) throws Exception {
+        Map<String, Form> map = new LinkedHashMap<>();
+        if (eventForms == null) return map;
+        for (Form eventForm : eventForms) {
+            if (eventForm == null) continue;
+            String eventName = trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_事件名称));
+            if (StrUtil.isBlank(eventName) || map.containsKey(eventName)) continue;
+            map.put(eventName, eventForm);
+        }
+        return map;
+    }
+
+    private static void fillAppGlobalEventForm(String ownerUuid, Form eventForm,
+                                               GlobalEventDefinitionRecordDto event) throws Exception {
+        eventForm.setAttrValue(Form.Owner, ownerUuid);
+        eventForm.setAttrValue(OctoCM2WorkBenchConst.面板事件构面_事件名称, event.getEventName());
+        eventForm.setAttrValue(OctoCM2WorkBenchConst.面板事件构面_事件说明, APP_GLOBAL_EVENT_DESC);
+        eventForm.setAttrValue(OctoCM2WorkBenchConst.面板事件构面_动作说明, event.getDefinitionJson());
+    }
+
+    private static void rewriteApplicationGlobalEventReferences(IDao dao, OctoDomainOpObserver observer,
+                                                                Form applicationForm, List<Form> savedForms)
+            throws Exception {
+        List<AssociationData> associations = new ArrayList<>();
+        if (savedForms != null) {
+            for (Form savedForm : savedForms) {
+                associations.add(toAssociationData(savedForm));
+            }
+        }
+        applicationForm.setAttrValue(ApplicationDeployDto.sAppEvent, associations);
+        IFormMgr.get().updateForm(null, dao, applicationForm, observer);
+    }
+
+    private static void cleanupResidualAppGlobalEventForms(IDao dao, List<Form> currentEventForms, Set<String> keepUuids)
+            throws Exception {
+        if (currentEventForms == null || currentEventForms.isEmpty()) return;
+        Set<String> keep = keepUuids == null ? new LinkedHashSet<>() : keepUuids;
+        for (Form eventForm : currentEventForms) {
+            if (eventForm == null || StrUtil.isBlank(eventForm.getUuid())) continue;
+            if (keep.contains(eventForm.getUuid())) continue;
+            IFormMgr.get().deleteForm(dao, eventForm.getFormModelId(), eventForm.getUuid());
+        }
+    }
+
+    private static int findMaxAppGlobalEventCodeNumber(List<Form> eventForms) throws Exception {
+        int max = 0;
+        if (eventForms == null) return max;
+        for (Form eventForm : eventForms) {
+            if (eventForm == null) continue;
+            String eventCode = trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_事件编号));
+            int number = parseAppGlobalEventCodeNumber(eventCode);
+            if (number > max) max = number;
+        }
+        return max;
+    }
+
+    private static int parseAppGlobalEventCodeNumber(String eventCode) {
+        if (StrUtil.isBlank(eventCode) || !eventCode.startsWith(APP_GLOBAL_EVENT_CODE_PREFIX)) return 0;
+        String suffix = eventCode.substring(APP_GLOBAL_EVENT_CODE_PREFIX.length());
+        try {
+            return Integer.parseInt(suffix);
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private static String formatAppGlobalEventCode(int number) {
+        return APP_GLOBAL_EVENT_CODE_PREFIX + String.format("%0" + APP_GLOBAL_EVENT_CODE_LENGTH + "d", number);
+    }
+
+    private static AssociationData toAssociationData(Form form) throws Exception {
+        if (form == null) return null;
+        String formCode = form.getString(Form.Code);
+        if (StrUtil.isBlank(formCode)) formCode = form.getUuid();
+        return new AssociationData(form.getFormModelId(), formCode);
+    }
+
+    private static String trim(String value) {
+        return value == null ? null : value.trim();
+    }
+
+    private static String safeText(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String getFormStringQuietly(Form form, String fieldName) {
+        try {
+            return form == null ? "" : safeText(form.getString(fieldName));
+        } catch (Exception e) {
+            return "";
+        }
+    }
 
     // ========================= 应用扩展配置方法 =========================
 
