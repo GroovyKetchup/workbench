@@ -71,8 +71,21 @@ public class ApplicationUtil {
     // 应用选择下拉框
     public static final String WIDGET_ID_APPLICATION_SELECT_EDITOR = "WIDGET_ID_APPLICATION_SELECT_EDITOR";
     public static final String FormModelId_Application = ApplicationDeployDto.FormModelId;
+    /**
+     * 应用级全局事件定义的事件说明标记。
+     * <p>
+     * 面板事件模型同时承载普通面板事件和应用全局事件定义，此值用于区分“应用事件”。
+     */
     public static final String APP_GLOBAL_EVENT_DESC = ApplicationDeployDto.sAppEvent;
+    /**
+     * 后端分配的应用级全局事件编号前缀。
+     * <p>
+     * 事件编号按发布应用 Form 的 Owner 维度递增，仅用于后端识别和展示，不参与运行时事件匹配。
+     */
     public static final String APP_GLOBAL_EVENT_CODE_PREFIX = "APP_EVT_";
+    /**
+     * 应用级全局事件编号数字后缀的固定长度。
+     */
     public static final int APP_GLOBAL_EVENT_CODE_LENGTH = 5;
     /**
      * 对外兼容使用的IP白名单配置字段名。
@@ -266,8 +279,19 @@ public class ApplicationUtil {
     // ========================= 支撑方法 =========================
 
 
-    // ========================= Application global event definitions =========================
+    // ========================= 应用级全局事件定义 =========================
 
+    /**
+     * 按应用编码读取应用级全局事件定义。
+     * <p>
+     * 应用编码仅用于定位 workbench 发布应用 Form（{@link ApplicationDeployDto#FormModelId}），
+     * 不作为事件定义的稳定归属边界。返回的事件定义以发布应用 Form 的 UUID 作为归属范围。
+     *
+     * @param dao 当前 DAO
+     * @param appCode 用于定位发布应用 Form 的应用编码或系统名称
+     * @return 当前版本号和全局事件定义记录
+     * @throws Exception 应用不存在或表单数据读取失败时抛出
+     */
     public static GlobalEventDefinitionsDto getGlobalEventDefinitions(IDao dao, String appCode) throws Exception {
         if (dao == null) throw new RuntimeException("dao must not be null");
         if (StrUtil.isBlank(appCode)) throw ApplicationException.Builder.appCodeEmpty();
@@ -276,13 +300,39 @@ public class ApplicationUtil {
         return getGlobalEventDefinitions(dao, applicationForm);
     }
 
+    /**
+     * 从 workbench 发布应用 Form 读取应用级全局事件定义。
+     * <p>
+     * 入参 Form 必须是 {@link ApplicationDeployDto#FormModelId}。该 Form 的 UUID 作为事件 Owner
+     * 边界，只读取面板事件模型中 Owner 等于应用 Form UUID 且事件说明等于
+     * {@link #APP_GLOBAL_EVENT_DESC} 的事件 Form。
+     *
+     * @param dao 当前 DAO
+     * @param applicationForm workbench 发布应用 Form
+     * @return 当前版本号和全局事件定义记录
+     * @throws Exception Form 模型不正确或表单数据读取失败时抛出
+     */
     public static GlobalEventDefinitionsDto getGlobalEventDefinitions(IDao dao, Form applicationForm) throws Exception {
         if (dao == null) throw new RuntimeException("dao must not be null");
-        if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
+        requireApplicationDeployForm(applicationForm);
         return buildGlobalEventDefinitionsDto(applicationForm.getUuid(),
                 queryAppGlobalEventForms(dao, applicationForm.getUuid()));
     }
 
+    /**
+     * 按应用编码更新应用级全局事件定义。
+     * <p>
+     * 此重载会先把 {@code appCode} 解析为 workbench 发布应用 Form，再委托给 Form 入参重载。
+     * 已有事件编号保持稳定，因为事件归属边界是发布应用 Form UUID，而不是 {@code appCode}。
+     *
+     * @param dao 当前 DAO
+     * @param observer 表单创建、更新操作使用的领域观察者
+     * @param appCode 用于定位发布应用 Form 的应用编码或系统名称
+     * @param baseRevision 上一次读取返回的版本号，用于乐观锁校验
+     * @param events 期望保存的事件定义记录集合
+     * @return 保存后的版本号和事件定义记录
+     * @throws Exception 应用不存在、乐观锁冲突或保存失败时抛出
+     */
     public static GlobalEventDefinitionsDto updateGlobalEventDefinitions(IDao dao, OctoDomainOpObserver observer,
                                                                          String appCode, String baseRevision,
                                                                          List<GlobalEventDefinitionRecordDto> events)
@@ -294,13 +344,37 @@ public class ApplicationUtil {
         return updateGlobalEventDefinitions(dao, observer, applicationForm, baseRevision, events);
     }
 
+    /**
+     * 更新指定 workbench 发布应用 Form 的应用级全局事件定义。
+     * <p>
+     * 入参 Form 必须是 {@link ApplicationDeployDto#FormModelId}。每条记录中，{@code eventName}
+     * 保存为面板事件名称，{@code definitionJson} 保存为动作说明。后端不解析
+     * {@code definitionJson} 的业务结构，只校验非空且是合法 JSON。
+     * <p>
+     * 保存行为：
+     * <ul>
+     *     <li>使用应用 Form UUID 作为事件 Owner。</li>
+     *     <li>按 Owner、应用事件说明和事件名称匹配已有事件。</li>
+     *     <li>使用 {@link #APP_GLOBAL_EVENT_CODE_PREFIX} 为缺失编号的事件分配编号。</li>
+     *     <li>将 {@link ApplicationDeployDto#sAppEvent} 重写为本次保存得到的事件 Form。</li>
+     *     <li>删除同一 Owner 下已不在本次定义集合中的残留应用全局事件 Form。</li>
+     * </ul>
+     *
+     * @param dao 当前 DAO
+     * @param observer 表单创建、更新操作使用的领域观察者
+     * @param applicationForm workbench 发布应用 Form
+     * @param baseRevision 上一次读取返回的版本号，用于乐观锁校验
+     * @param events 期望保存的事件定义记录集合
+     * @return 保存后的版本号和事件定义记录
+     * @throws Exception Form 模型不正确、乐观锁冲突、入参校验失败或保存失败时抛出
+     */
     public static GlobalEventDefinitionsDto updateGlobalEventDefinitions(IDao dao, OctoDomainOpObserver observer,
                                                                          Form applicationForm, String baseRevision,
                                                                          List<GlobalEventDefinitionRecordDto> events)
             throws Exception {
         if (dao == null) throw new RuntimeException("dao must not be null");
         if (observer == null) throw new RuntimeException("observer must not be null");
-        if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
+        requireApplicationDeployForm(applicationForm);
         if (StrUtil.isBlank(applicationForm.getUuid())) throw new RuntimeException("applicationForm uuid must not be blank");
 
         List<Form> currentEventForms = queryAppGlobalEventForms(dao, applicationForm.getUuid());
@@ -341,21 +415,57 @@ public class ApplicationUtil {
         return getGlobalEventDefinitions(dao, applicationForm);
     }
 
+    /**
+     * 校验调用方没有传入 gpf.md.Application 或其他类似应用 Form。
+     * <p>
+     * 全局事件定义通过 workbench 发布应用 Form 落库，因为 {@link ApplicationDeployDto#sAppEvent}
+     * 属于该模型。传入其他 Form 会导致事件记录被写到错误的 Owner UUID 下。
+     */
+    private static void requireApplicationDeployForm(Form applicationForm) {
+        if (applicationForm == null) throw new RuntimeException("applicationForm must not be null");
+        String formModelId = applicationForm.getFormModelId();
+        if (!Objects.equals(FormModelId_Application, formModelId)) {
+            throw new RuntimeException(StrUtil.format(
+                    "applicationForm must be [{}], but got [{}]",
+                    FormModelId_Application, formModelId));
+        }
+    }
+
+    /**
+     * 调用方基于过期版本更新全局事件定义时抛出的冲突异常。
+     * <p>
+     * 异常中会携带服务端最新定义，方便接口调用方直接刷新，而不必再次查询。
+     */
     public static class GlobalEventDefinitionsConflictException extends RuntimeException {
         private static final long serialVersionUID = 1L;
 
         private final GlobalEventDefinitionsDto latest;
 
+        /**
+         * 使用服务端最新全局事件定义创建冲突异常。
+         *
+         * @param latest 当前服务端最新定义
+         */
         public GlobalEventDefinitionsConflictException(GlobalEventDefinitionsDto latest) {
             super("Global event definitions were changed by another client. Please refresh and retry.");
             this.latest = latest;
         }
 
+        /**
+         * 获取服务端最新全局事件定义。
+         *
+         * @return 服务端最新全局事件定义
+         */
         public GlobalEventDefinitionsDto getLatest() {
             return latest;
         }
     }
 
+    /**
+     * 保存前规范化前端传入的事件记录。
+     * <p>
+     * 事件名称会去除首尾空白并要求唯一。调用方传入的事件编号会被忽略，因为编号由后端分配并维护。
+     */
     private static List<GlobalEventDefinitionRecordDto> normalizeGlobalEventRecords(
             List<GlobalEventDefinitionRecordDto> events) {
         List<GlobalEventDefinitionRecordDto> normalized = new ArrayList<>();
@@ -378,6 +488,11 @@ public class ApplicationUtil {
         return normalized;
     }
 
+    /**
+     * 校验待存储的事件定义内容是 JSON。
+     * <p>
+     * 此方法故意不校验前端事件定义的业务结构，完整 JSON 会作为不透明定义文档保存。
+     */
     private static void validateGlobalEventDefinitionJson(String definitionJson) {
         if (StrUtil.isBlank(definitionJson)) throw new IllegalArgumentException("definitionJson must not be blank");
         try {
@@ -392,6 +507,12 @@ public class ApplicationUtil {
         }
     }
 
+    /**
+     * 查询归属于某个发布应用 Form 的事件 Form。
+     * <p>
+     * 只有 Owner 等于应用 Form UUID 且事件说明等于 {@link #APP_GLOBAL_EVENT_DESC} 的面板事件
+     * Form，才会被视为应用级全局事件定义。
+     */
     private static List<Form> queryAppGlobalEventForms(IDao dao, String ownerUuid) throws Exception {
         if (StrUtil.isBlank(ownerUuid)) return new ArrayList<>();
 
@@ -415,6 +536,9 @@ public class ApplicationUtil {
         return eventForms;
     }
 
+    /**
+     * 根据已落库的事件 Form 构造接口 DTO 和乐观锁版本号。
+     */
     private static GlobalEventDefinitionsDto buildGlobalEventDefinitionsDto(String ownerUuid, List<Form> eventForms)
             throws Exception {
         List<GlobalEventDefinitionRecordDto> records = new ArrayList<>();
@@ -431,6 +555,9 @@ public class ApplicationUtil {
                 .setEvents(records);
     }
 
+    /**
+     * 将一条已落库的面板事件 Form 转换为接口记录。
+     */
     private static GlobalEventDefinitionRecordDto toGlobalEventDefinitionRecord(Form eventForm) throws Exception {
         if (eventForm == null) return null;
         String eventName = trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_事件名称));
@@ -441,6 +568,9 @@ public class ApplicationUtil {
                 .setDefinitionJson(trim(eventForm.getString(OctoCM2WorkBenchConst.面板事件构面_动作说明)));
     }
 
+    /**
+     * 根据应用 Owner UUID 和排序后的事件记录构造稳定版本哈希。
+     */
     private static String buildGlobalEventRevision(String ownerUuid, List<GlobalEventDefinitionRecordDto> records)
             throws Exception {
         List<GlobalEventDefinitionRecordDto> sortedRecords = new ArrayList<>();
@@ -467,6 +597,9 @@ public class ApplicationUtil {
         return revision.toString();
     }
 
+    /**
+     * 按事件名称索引已有事件 Form，以便保存时保留既有事件编号。
+     */
     private static Map<String, Form> indexGlobalEventFormsByName(List<Form> eventForms) throws Exception {
         Map<String, Form> map = new LinkedHashMap<>();
         if (eventForms == null) return map;
@@ -479,6 +612,9 @@ public class ApplicationUtil {
         return map;
     }
 
+    /**
+     * 将接口记录字段按落库映射写入面板事件 Form。
+     */
     private static void fillAppGlobalEventForm(String ownerUuid, Form eventForm,
                                                GlobalEventDefinitionRecordDto event) throws Exception {
         eventForm.setAttrValue(Form.Owner, ownerUuid);
@@ -487,6 +623,9 @@ public class ApplicationUtil {
         eventForm.setAttrValue(OctoCM2WorkBenchConst.面板事件构面_动作说明, event.getDefinitionJson());
     }
 
+    /**
+     * 将发布应用 Form 的“应用事件”关联字段重写为本次保存得到的事件集合。
+     */
     private static void rewriteApplicationGlobalEventReferences(IDao dao, OctoDomainOpObserver observer,
                                                                 Form applicationForm, List<Form> savedForms)
             throws Exception {
@@ -500,6 +639,9 @@ public class ApplicationUtil {
         IFormMgr.get().updateForm(null, dao, applicationForm, observer);
     }
 
+    /**
+     * 删除保存前属于该应用、但已不在本次提交定义集合中的应用级全局事件 Form。
+     */
     private static void cleanupResidualAppGlobalEventForms(IDao dao, List<Form> currentEventForms, Set<String> keepUuids)
             throws Exception {
         if (currentEventForms == null || currentEventForms.isEmpty()) return;
@@ -511,6 +653,9 @@ public class ApplicationUtil {
         }
     }
 
+    /**
+     * 查找当前应用 Owner 下已有 APP_EVT 编号的最大数字后缀。
+     */
     private static int findMaxAppGlobalEventCodeNumber(List<Form> eventForms) throws Exception {
         int max = 0;
         if (eventForms == null) return max;
@@ -523,6 +668,9 @@ public class ApplicationUtil {
         return max;
     }
 
+    /**
+     * 解析 APP_EVT 编号的数字后缀；不匹配的值按 0 处理。
+     */
     private static int parseAppGlobalEventCodeNumber(String eventCode) {
         if (StrUtil.isBlank(eventCode) || !eventCode.startsWith(APP_GLOBAL_EVENT_CODE_PREFIX)) return 0;
         String suffix = eventCode.substring(APP_GLOBAL_EVENT_CODE_PREFIX.length());
@@ -533,10 +681,16 @@ public class ApplicationUtil {
         }
     }
 
+    /**
+     * 格式化后端分配的应用级全局事件编号。
+     */
     private static String formatAppGlobalEventCode(int number) {
         return APP_GLOBAL_EVENT_CODE_PREFIX + String.format("%0" + APP_GLOBAL_EVENT_CODE_LENGTH + "d", number);
     }
 
+    /**
+     * 为发布应用 Form 的“应用事件”字段创建关联数据。
+     */
     private static AssociationData toAssociationData(Form form) throws Exception {
         if (form == null) return null;
         String formCode = form.getString(Form.Code);
