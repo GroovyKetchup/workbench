@@ -30,7 +30,7 @@ import static octo.cm.constant.WorkBenchConst.*;
  * 维护“流程”发布逻辑时，请注意本类方法可能同时被“报表”发布复用，改动需谨慎。</p>
  *
  * <p><b>关键链接：</b>{@link #locateOrCreatePanel(String)} 新建分支会设置
- * {@code panel.setAttrValue(Form.Owner, ownerDef.getUuid())}，让目标面板归属于其定义（流程定义 / 报表定义），
+ * {@code panel.setAttrValue(Form.Owner, defForm.getUuid())}，让目标面板归属于其定义（流程定义 / 报表定义），
  * 实现“删定义联动删面板”。</p>
  *
  * <p>数据覆盖语义：所有子表整表覆盖；关联列表整体替换；被取消引用的旧底层 Form 不做物理删除。</p>
@@ -56,10 +56,11 @@ public abstract class AbstractToPanelDesignPublisher {
     protected final String modelType;
 
     /**
-     * 拥有目标面板的“定义” Form：其 uuid 写入 {@code 目标面板.Form.Owner}。
-     * <p>流程发布时为流程定义，报表发布时为报表定义。</p>
+     * 被发布的“定义” Form：流程发布时为流程定义，报表发布时为报表定义。
+     * <p>新建面板时其 uuid 写入 {@code 目标面板.Form.Owner}（实现“删定义联动删面板”）；
+     * 子类也会读它的其它字段（如报表发布取 FormModelId 作描述标记），故按“定义本身”而非“Owner”命名。</p>
      */
-    protected final Form ownerDef;
+    protected final Form defForm;
 
     protected final JSONObject src;
 
@@ -88,14 +89,14 @@ public abstract class AbstractToPanelDesignPublisher {
      * @param dao       数据访问会话
      * @param observer  业务域观察者
      * @param modelType 模型类别（如“流程”“报表”）
-     * @param ownerDef  拥有目标面板的定义 Form（其 uuid 写入面板 Owner）
+     * @param defForm   被发布的定义 Form（流程定义 / 报表定义；新建面板时 uuid 写入面板 Owner）
      * @param src       发布源数据（前端映射过来的面板 JSON）
      */
-    protected AbstractToPanelDesignPublisher(IDao dao, OctoDomainOpObserver observer, String modelType, Form ownerDef, JSONObject src) {
+    protected AbstractToPanelDesignPublisher(IDao dao, OctoDomainOpObserver observer, String modelType, Form defForm, JSONObject src) {
         this.dao = dao;
         this.observer = observer;
         this.modelType = modelType;
-        this.ownerDef = ownerDef;
+        this.defForm = defForm;
         this.src = src;
     }
 
@@ -151,8 +152,8 @@ public abstract class AbstractToPanelDesignPublisher {
         Form shell = new Form(FormModelId_PanelDesign);
 
         // 设置依赖，到时候定义删除底下面板也一起联动删掉
-        if (ownerDef != null) {
-            shell.setAttrValue(Form.Owner, ownerDef.getUuid());
+        if (defForm != null) {
+            shell.setAttrValue(Form.Owner, defForm.getUuid());
         }
 
         // 提前塞一下面板名称，便于服务端创建默认按钮（XX_新增）时使用真实名字

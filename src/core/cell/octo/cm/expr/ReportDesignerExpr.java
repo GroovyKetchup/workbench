@@ -20,6 +20,7 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import gpf.adur.data.Form;
 import gpf.adur.data.TableData;
+import octo.cm.constant.PanelDesignConst;
 import octo.cm.constant.ReportDesignConst;
 import octo.cm.constant.WorkBenchConst;
 import octo.cm.exception.business.CommonException;
@@ -101,7 +102,7 @@ public interface ReportDesignerExpr extends CellIntf {
         if (StrUtil.isBlank(domain)) throw DomainException.Builder.busDomainCodeEmpty();
 
         // 报表定义取上一步「表单保存」的返回（镜像流程），不再从 context 取
-        Object formObj = output == null ? null : output.get("表单保存");
+        Object formObj = output == null ? null : output.get(ReportDesignConst.Event_SaveForm);
         if (!(formObj instanceof Form)) throw new RuntimeException("未拿到上一个操作函数的返回值（表单保存）");
         Form reportDef = (Form) formObj;
 
@@ -110,8 +111,8 @@ public interface ReportDesignerExpr extends CellIntf {
 
         // 面板名称/面板描述映射收进函数内部：从报表定义取，前端不再承担该职责
         JSONObject src = new JSONObject();
-        src.set(ReportDesignConst.FieldName_PanelName, reportDef.getString(ReportDesignConst.FieldName_ReportName));
-        src.set(ReportDesignConst.FieldName_PanelDesc,
+        src.set(PanelDesignConst.FieldName_PanelName, reportDef.getString(ReportDesignConst.FieldName_ReportName));
+        src.set(PanelDesignConst.FieldName_PanelDesc,
                 StrUtil.blankToDefault(reportDef.getString(ReportDesignConst.FieldName_ReportDesc), ""));
 
         try (IDao dao = IDaoService.newIDao()) {
@@ -124,7 +125,7 @@ public interface ReportDesignerExpr extends CellIntf {
             // 新建分支（含“关联面板找不到”的回退）：把新分配的面板编号回写到报表定义
             if (publisher.isNewPanel()) {
                 reportDef.setAttrValue(ReportDesignConst.FieldName_LinkedPanel,
-                        panelDesign.getString(ReportDesignConst.FieldName_PanelCode));
+                        panelDesign.getString(PanelDesignConst.FieldName_PanelCode));
                 reportDef = IFormMgr.get().updateForm(null, dao, reportDef, observer);
                 dao.commit();
             }
@@ -167,7 +168,8 @@ public interface ReportDesignerExpr extends CellIntf {
      *
      * <p>连接配置收敛为单个 JSON 入参，键用中文字段名（与”数据连接”子表/{@link ReportDesignConst} 对齐）：
      * 连接标识/连接地址/用户名/密码/数据库驱动/数据库类型（预留 鉴权方式/请求头/连接配置）。
-     * 其中”密码”为平台”密码”类型，由平台落库时透明加密；本方法按原值写入即可，不在日志/返回中输出明文。
+     * 其中”密码”为平台”密码”类型，落库透明加密；密码为空或等于哨兵 {@link ReportDesignConst#Password_UnchangedSentinel}
+     * 时视为未修改、保留旧值，仅真实新值才更新；不在日志/返回中输出明文。
      * 报表定义经 Owner + 描述字段隐藏标记查询加载，不依赖操作上下文 CM。</p>
      *
      * @param domain          业务域编号
@@ -229,8 +231,9 @@ public interface ReportDesignerExpr extends CellIntf {
             }
             row.setAttrValue(ReportDesignConst.FieldName_ConnectionUrl, url);
             row.setAttrValue(ReportDesignConst.FieldName_UserName, StrUtil.blankToDefault(userName, ""));
-            // 密码字段需要转为 Password 对象
-            if (StrUtil.isNotBlank(password)) {
+            // 密码回显哨兵协议：空或哨兵=未改密码，跳过写入即保留旧行密码（复用的 row 为查出的旧行）；
+            // 仅真实新值才转 Password 落库，避免把占位/脱敏值当真密码存回
+            if (StrUtil.isNotBlank(password) && !ReportDesignConst.Password_UnchangedSentinel.equals(password)) {
                 row.setAttrValue(ReportDesignConst.FieldName_Password, new gpf.adur.data.Password().setValue(password));
             }
             row.setAttrValue(ReportDesignConst.FieldName_DbDriver, StrUtil.blankToDefault(driver, ""));
@@ -293,10 +296,10 @@ public interface ReportDesignerExpr extends CellIntf {
     }
 
     /**
-     * 列出报表定义”数据连接”子表的所有连接（密码字段脱敏，不回传明文）。
+     * 列出报表定义”数据连接”子表的所有连接（密码字段以哨兵占位，绝不回传明文）。
      *
      * @param targetPanelCode 目标面板编号（经 Owner + 描述字段隐藏标记查询报表定义）
-     * @return 连接列表，每项含 连接标识/连接地址/用户名/数据库驱动/数据库类型/密码(脱敏)
+     * @return 连接列表，每项含 连接标识/连接地址/用户名/数据库驱动/数据库类型/密码(哨兵占位)
      * @throws Exception 面板/报表定义加载失败
      */
     @MethodDeclare(
@@ -321,10 +324,11 @@ public interface ReportDesignerExpr extends CellIntf {
                 item.put(ReportDesignConst.FieldName_UserName, r.getString(ReportDesignConst.FieldName_UserName));
                 item.put(ReportDesignConst.FieldName_DbDriver, r.getString(ReportDesignConst.FieldName_DbDriver));
                 item.put(ReportDesignConst.FieldName_DbType, r.getString(ReportDesignConst.FieldName_DbType));
-                // 密码字段脱敏：从 Password 对象获取值后脱敏
+                // 密码回显哨兵：有密码回占位哨兵（绝不回明文），无密码回空串；前端未改则原样回传，saveDataConnection 据此保留旧值
                 gpf.adur.data.Password passwordObj = r.getPassword(ReportDesignConst.FieldName_Password);
                 String rawPwd = (passwordObj != null) ? passwordObj.getValue() : "";
-                item.put(ReportDesignConst.FieldName_Password, maskPassword(rawPwd));
+                item.put(ReportDesignConst.FieldName_Password,
+                        StrUtil.isNotBlank(rawPwd) ? ReportDesignConst.Password_UnchangedSentinel : "");
                 result.add(item);
             }
             return result;
@@ -443,11 +447,11 @@ public interface ReportDesignerExpr extends CellIntf {
      */
     default Form loadReportDefByPanelCode(IDao dao, String panelCode) throws Exception {
         Form panel = Op.queryFormByValueMatchAnyField(dao, WorkBenchConst.FormModelId_PanelDesign,
-                CollUtil.newHashSet(ReportDesignConst.FieldName_PanelCode), panelCode, null);
+                CollUtil.newHashSet(PanelDesignConst.FieldName_PanelCode), panelCode, null);
         if (panel == null) throw PanelDesignException.Builder.notFoundWithCode(panelCode);
 
         // 从面板描述提取 FormModelId
-        String panelDesc = panel.getString("面板描述");
+        String panelDesc = panel.getString(PanelDesignConst.FieldName_PanelDesc);
         String reportDefFormModelId = extractReportDefModelId(panelDesc);
         if (StrUtil.isBlank(reportDefFormModelId)) {
             throw new RuntimeException("面板[" + panelCode + "]描述中未找到报表定义模型标记");
@@ -518,15 +522,5 @@ public interface ReportDesignerExpr extends CellIntf {
         String driver = connRow.getString(ReportDesignConst.FieldName_DbDriver);
         String dbType = connRow.getString(ReportDesignConst.FieldName_DbType);
         return ReportJdbcDataSource.of(panelCode, connectionId, url, user, pwd, driver, dbType);
-    }
-
-    /**
-     * 密码脱敏：非空一律返回固定掩码，绝不回传明文。
-     *
-     * @param raw 原始密码
-     * @return 脱敏后的展示值
-     */
-    default String maskPassword(String raw) {
-        return StrUtil.isBlank(raw) ? "" : "******";
     }
 }

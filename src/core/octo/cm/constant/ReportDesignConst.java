@@ -34,6 +34,8 @@ public final class ReportDesignConst {
 
     // ========================= 事件 / 按钮名（与前端 callEvent / callButton 契约一致） =========================
 
+    public static final String Event_SaveForm = "表单保存";
+
     /**
      * 运行态取数事件名。
      * <p>与前端 {@code ExternalDataSource.ts} 的 {@code EXTERNAL_QUERY_EVENT} 逐字一致；
@@ -53,16 +55,8 @@ public final class ReportDesignConst {
     /** 保存/更新报表记录的按钮名（与前端 callButton 契约一致）。 */
     public static final String Button_SaveReport = "报表设计器_保存";
 
-    // ========================= 面板设计相关字段（复用既有面板模型） =========================
-
-    /** 面板设计 Form 的“面板编号”字段名。 */
-    public static final String FieldName_PanelCode = "面板编号";
-
-    /** 面板设计 Form 的“面板名称”字段名。 */
-    public static final String FieldName_PanelName = "面板名称";
-
-    /** 面板设计 Form 的“面板描述”字段名。 */
-    public static final String FieldName_PanelDesc = "面板描述";
+    // ========================= 报表定义↔面板绑定字段 =========================
+    // 面板自身字段名（面板编号/名称/描述）已迁至 PanelDesignConst 统一维护，见 PanelDesignConst.FieldName_Panel*。
 
     /**
      * 报表定义里“关联面板”字段名（保存其发布到的目标面板编号）。
@@ -96,6 +90,15 @@ public final class ReportDesignConst {
 
     /** 数据库密码字段名（敏感字段：禁止明文回传/记录日志）。 */
     public static final String FieldName_Password = "密码";
+
+    /**
+     * 密码“未修改”回显哨兵。
+     * <p>{@link cell.octo.cm.expr.ReportDesignerExpr#listDataConnections} 用它占位代替真实密码回传；
+     * {@link cell.octo.cm.expr.ReportDesignerExpr#saveDataConnection} 收到该值即视为“未修改密码”、保留旧值不覆盖。
+     * 故意取一个几乎不可能与真实密码碰撞的怪串（区别于普通掩码 {@code "******"}——掩码可能撞真实密码且无保存端识别）；
+     * 与 {@code server_zbyth} 的 {@code IReportCommonAction.immutablePassword} 同款，便于跨系统对齐。</p>
+     */
+    public static final String Password_UnchangedSentinel = "!@#$%^&*_IMMUTABLE_!@#$%^&*";
 
     /** 数据库驱动类字段名。 */
     public static final String FieldName_DbDriver = "数据库驱动";

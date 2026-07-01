@@ -3,12 +3,20 @@ package octo.cm.util;
 import cell.cdao.IDao;
 import cell.gpf.adur.data.IFormMgr;
 import cmn.anotation.ClassDeclare;
-import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import gpf.adur.data.AssociationData;
 import gpf.adur.data.Form;
+import gpf.adur.data.ResultSet;
+import gpf.adur.data.TableData;
+import octo.cm.constant.PanelDesignConst;
+import octo.cm.constant.ReportDesignConst;
 import octocm.domain.observer.OctoDomainOpObserver;
+
+import static octo.cm.constant.WorkBenchConst.FormModelId_Axis_Event;
+import static octo.cm.constant.WorkBenchConst.SlaveFormModelId_PanelDesign_Constraint_Event;
+
 import org.nutz.dao.entity.annotation.Comment;
+import org.nutz.dao.util.cri.SqlExpression;
 
 /**
  * 报表设计发布到面板设计的处理器（一次性实例化使用）。
@@ -81,24 +89,83 @@ public class ReportToPanelDesignPublisher extends AbstractToPanelDesignPublisher
         ensureDefaultCreateButton();
         ensureSystemDefaultButtons();
         buildDefaultViews();
+        // 报表面板固定挂一条「操作_执行数据查询」面板事件，供运行态取数
+        ensureExecDataQueryPanelEvent();
 
         // 双向绑定：
         // 1. Owner 存报表定义 uuid（用于关联和联动删除）
         // 2. 面板描述末尾追加隐藏标记存 FormModelId（支持多报表定义模型，跨环境自动迁移）
-        if (ownerDef != null) {
-            panel.setAttrValueByCode(Form.Owner, ownerDef.getUuid());
+        if (defForm != null) {
+            panel.setAttrValueByCode(Form.Owner, defForm.getUuid());
 
-            String panelDesc = panel.getString("面板描述");
+            String panelDesc = panel.getString(PanelDesignConst.FieldName_PanelDesc);
             if (panelDesc == null) panelDesc = "";
             // 移除旧标记
             panelDesc = panelDesc.replaceAll("<!--REPORT_DEF_MODEL_ID:.*?-->", "");
             // 追加新标记（HTML 注释，前端不可见）
-            String marker = "<!--REPORT_DEF_MODEL_ID:" + ownerDef.getFormModelId() + "-->";
-            panel.setAttrValue("面板描述", panelDesc + marker);
+            String marker = "<!--REPORT_DEF_MODEL_ID:" + defForm.getFormModelId() + "-->";
+            panel.setAttrValue(PanelDesignConst.FieldName_PanelDesc, panelDesc + marker);
         }
 
         panel = IFormMgr.get().updateForm(null, dao, panel, observer);
         dao.commit();
         return panel;
+    }
+
+    /**
+     * 取事件轴模型（{@link octo.cm.constant.WorkBenchConst#FormModelId_Axis_Event}）里
+     * “事件名称”为 {@link ReportDesignConst#Event_ExecuteReportQuery} 的那条事件定义。
+     *
+     * <p>按字段名分页查询的写法参考 {@link #ensureSystemDefaultButtons()}。</p>
+     *
+     * @return 该事件定义 Form；不存在时返回 {@code null}
+     * @throws Exception 查询失败
+     */
+    protected Form findExecDataQueryEvent() throws Exception {
+        SqlExpression domainFilterExpr = Op.getBusDomainFilterExpr(observer, FormModelId_Axis_Event);
+        ResultSet<Form> eventRs = Op.queryFormPageByCondition(dao, FormModelId_Axis_Event,
+                PanelDesignConst.FieldName_EventName, ReportDesignConst.Event_ExecuteReportQuery, cnd -> {
+                    if (domainFilterExpr != null) {
+                        cnd.where().and(domainFilterExpr);
+                    }
+                    return cnd;
+                });
+        if (eventRs.isEmpty()) {
+            return null;
+        }
+        return eventRs.getDataList().get(0);
+    }
+
+    /**
+     * 确保面板的[面板事件]子表里挂有一条“事件实现 = {@link ReportDesignConst#Event_ExecuteReportQuery}”的记录。
+     *
+     * <p>子表结构与挂载方式参考 {@link #buildDefaultViews()} 里对[面板事件]（行点击）的处理；
+     * 去重方式参考 {@link #ensureDefaultCreateButton()}——按事件实现关联值（uuid/编号）比对，已存在则不重复挂载。
+     * 追加语义：不覆盖 {@link #buildDefaultViews()} 已写入的行点击事件。</p>
+     *
+     * @throws Exception 查询/构建失败
+     */
+    protected void ensureExecDataQueryPanelEvent() throws Exception {
+        Form event = findExecDataQueryEvent();
+        if (event == null) throw new RuntimeException("未找到" + ReportDesignConst.Event_ExecuteReportQuery + "面板事件，请检查报表设计器面板及其面板事件定义。");
+
+        TableData td = panel.getTable(PanelDesignConst.FieldName_PanelEvent);
+        if (td == null) td = new TableData(SlaveFormModelId_PanelDesign_Constraint_Event);
+
+        // 已存在则不重复挂载
+        String eventUuid = event.getUuid();
+        String eventCode = event.getString(Form.Code);
+        for (Form row : td.getRows()) {
+            AssociationData ac = row.getAssociation(PanelDesignConst.FieldName_EventImpl);
+            if (ac == null) continue;
+            String acVal = ac.getValue();
+            if (acVal != null && (acVal.equals(eventUuid) || acVal.equals(eventCode))) return;
+        }
+
+        Form line = Op.newForm(td.getFormModelId());
+        line.setAttrValue(PanelDesignConst.FieldName_EventImpl, Op.toAssociationData(event));
+        td.add(line);
+
+        panel.setAttrValue(PanelDesignConst.FieldName_PanelEvent, td);
     }
 }
