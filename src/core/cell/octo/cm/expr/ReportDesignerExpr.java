@@ -1,5 +1,6 @@
 package cell.octo.cm.expr;
 
+import ai.webPage.utils.FormModelUtil;
 import cell.CellIntf;
 import cell.cdao.IDao;
 import cell.cdao.IDaoService;
@@ -18,14 +19,16 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import gpf.adur.data.AssociationData;
 import gpf.adur.data.Form;
 import gpf.adur.data.TableData;
+import octo.cm.constant.DataSourceConst;
 import octo.cm.constant.PanelDesignConst;
 import octo.cm.constant.ReportDesignConst;
 import octo.cm.constant.WorkBenchConst;
-import octo.cm.exception.business.CommonException;
 import octo.cm.exception.business.DomainException;
 import octo.cm.exception.business.PanelDesignException;
+import octo.cm.util.DataSourceJdbcUtil;
 import octo.cm.util.EasyOperation;
 import octo.cm.util.PanelDesignPublishUtil;
 import octo.cm.util.ReportJdbcDataSource;
@@ -33,9 +36,8 @@ import octo.cm.util.ReportQueryHelper;
 import octo.cm.util.ReportToPanelDesignPublisher;
 import octocm.domain.observer.OctoDomainOpObserver;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -44,16 +46,15 @@ import java.util.Map;
  * <p>本接口为报表设计器 Phase 3 提供后端操作函数：</p>
  * <ul>
  *   <li>{@link #publishToPanelDesign}：把报表定义一次性物化/发布到目标面板，并建立双向绑定：
- *   {@code 面板.Owner = 报表定义.uuid}，{@code 面板.描述 += “<!--REPORT_DEF_MODEL_ID:FormModelId-->”}，
- *   {@code 报表定义.”关联面板” = 面板编号}。</li>
+ *   {@code 面板.Owner = 报表定义.uuid}，{@code 报表定义.”关联面板” = 面板编号}。</li>
  *   <li>{@link #takeEffectPanelDesign}：报表面板生效（镜像流程）。</li>
  *   <li>数据连接 CRUD：{@link #saveDataConnection} / {@link #deleteDataConnection} / {@link #listDataConnections}。</li>
  *   <li>{@link #testConnection}：连接探活（rebuildDbPool + 轻量探活查询）。</li>
- *   <li>{@link #executeReportQuery}：运行态真参数化取数（通过 Owner + 描述字段隐藏标记查询，零硬编码面板编号）。</li>
+ *   <li>{@link #executeReportQuery}：运行态真参数化取数（通过报表定义面板配置定位数据集/连接）。</li>
  * </ul>
  *
- * <p><b>运行态取数（Owner + 描述字段隐藏标记查询）：</b>按面板编号查面板设计 Form → 从”面板描述”提取 {@code <!--REPORT_DEF_MODEL_ID:xxx-->} 得 FormModelId →
- * 读 {@code Form.Owner} 得 uuid → 直接查询报表定义 → 选”数据连接”子表中”连接标识”匹配行 →
+ * <p><b>运行态取数：</b>按报表定义面板编号查面板设计 Form → 从“面板数据”子表的“数据集/数据连接”场景属性样式解析业务面板编号 →
+ * 通过 {@link FormModelUtil#buildPanelFormModelIdByCmName(String, String)} 构建模型 ID → 按 {@code Form.Code} 查询数据集和数据连接 →
  * 构建自定义 {@link ReportJdbcDataSource} → {@link SqlStatementDto} 真参数化（{@code $name} → {@code ?} 绑定，
  * 集合自动展开 IN 列表，绝不拼 SQL 文本）。</p>
  *
@@ -81,8 +82,7 @@ public interface ReportDesignerExpr extends CellIntf {
      * <p>报表定义这条 Form 取自上一步「表单保存」操作函数的返回（镜像流程，经 {@code output.get(“表单保存”)}），
      * 不再从 {@link IContext#getCmInstance()} 取。面板名称/面板描述由本函数内部从报表定义映射，前端不再传 mappedData。
      * 处理器 {@link ReportToPanelDesignPublisher} 把数据一次性物化进目标面板并落库，建立双向绑定：
-     * {@code 面板.Owner = 报表定义.uuid}，{@code 面板.描述 += “<!--REPORT_DEF_MODEL_ID:FormModelId-->”}（发布器内设置），
-     * {@code 报表定义.”关联面板” = 面板编号}（新建分支时本函数回写）。</p>
+     * {@code 面板.Owner = 报表定义.uuid}，{@code 报表定义.”关联面板” = 面板编号}（新建分支时本函数回写）。</p>
      *
      * @param context 操作上下文
      * @param output  运行输出（取上一步「表单保存」返回的报表定义 Form）
@@ -121,12 +121,15 @@ public interface ReportDesignerExpr extends CellIntf {
             ReportToPanelDesignPublisher publisher =
                     new ReportToPanelDesignPublisher(dao, observer, ReportDesignConst.ModelType_Report, reportDef, src);
             Form panelDesign = publisher.publish(existedPanelCode);
+            boolean changed = updateExecuteReportQueryEvent(dao, panelDesign, extractPanelCodeFromFormModelId(reportDef.getFormModelId()));
 
             // 新建分支（含“关联面板找不到”的回退）：把新分配的面板编号回写到报表定义
             if (publisher.isNewPanel()) {
                 reportDef.setAttrValue(ReportDesignConst.FieldName_LinkedPanel,
                         panelDesign.getString(PanelDesignConst.FieldName_PanelCode));
                 reportDef = IFormMgr.get().updateForm(null, dao, reportDef, observer);
+                dao.commit();
+            } else if (changed) {
                 dao.commit();
             }
         }
@@ -164,224 +167,7 @@ public interface ReportDesignerExpr extends CellIntf {
     // ========================= 数据连接 CRUD =========================
 
     /**
-     * 新增或更新报表定义”数据连接”子表中的一行（按”连接标识”幂等 upsert）。
-     *
-     * <p>连接配置收敛为单个 JSON 入参，键用中文字段名（与”数据连接”子表/{@link ReportDesignConst} 对齐）：
-     * 连接标识/连接地址/用户名/密码/数据库驱动/数据库类型（预留 鉴权方式/请求头/连接配置）。
-     * 其中”密码”为平台”密码”类型，落库透明加密；密码为空或等于哨兵 {@link ReportDesignConst#Password_UnchangedSentinel}
-     * 时视为未修改、保留旧值，仅真实新值才更新；不在日志/返回中输出明文。
-     * 报表定义经 Owner + 描述字段隐藏标记查询加载，不依赖操作上下文 CM。</p>
-     *
-     * @param domain          业务域编号
-     * @param targetPanelCode 目标面板编号（经 Owner + 描述字段隐藏标记查询报表定义）
-     * @param connectionJson  数据连接配置 JSON（键为中文字段名；连接标识/连接地址必填）
-     * @return 更新后的报表定义 Form
-     * @throws Exception 上下文/子表缺失、JSON 非法或落库失败
-     */
-    @MethodDeclare(
-            label = "保存数据连接", how = "", what = "", why = "",
-            inputs = {
-                    @InputDeclare(name = "domain", label = "业务域编号", desc = "", exampleValue = "$domain$"),
-                    @InputDeclare(name = "targetPanelCode", label = "目标面板编号", desc = ""),
-                    @InputDeclare(name = "connectionJson", label = "数据连接配置", desc = "中文键 JSON"),
-            }
-    )
-    default Form saveDataConnection(String domain, String targetPanelCode, String connectionJson) throws Exception {
-        if (StrUtil.isBlank(domain)) throw DomainException.Builder.busDomainCodeEmpty();
-        if (StrUtil.isBlank(targetPanelCode)) throw new RuntimeException("目标面板编号不能为空");
-        if (StrUtil.isBlank(connectionJson)) throw CommonException.Builder.jsonDataEmpty();
-
-        JSONObject conn;
-        try {
-            conn = JSONUtil.parseObj(connectionJson);
-        } catch (Exception e) {
-            throw CommonException.Builder.invalidJsonData();
-        }
-        String connectionId = conn.getStr(ReportDesignConst.FieldName_ConnectionId);
-        String url = conn.getStr(ReportDesignConst.FieldName_ConnectionUrl);
-        String userName = conn.getStr(ReportDesignConst.FieldName_UserName);
-        String password = conn.getStr(ReportDesignConst.FieldName_Password);
-        String driver = conn.getStr(ReportDesignConst.FieldName_DbDriver);
-        String dbType = conn.getStr(ReportDesignConst.FieldName_DbType);
-        if (StrUtil.isBlank(connectionId)) throw new RuntimeException("连接标识不能为空");
-        if (StrUtil.isBlank(url)) throw new RuntimeException("连接地址不能为空");
-
-        OctoDomainOpObserver observer = Op.getOctoDomainOpObserver(domain);
-        if (observer == null) throw DomainException.Builder.notFoundWithCode(domain);
-
-        try (IDao dao = IDaoService.newIDao()) {
-            Form reportDef = loadReportDefByPanelCode(dao, targetPanelCode);
-
-            TableData td = reportDef.getTable(ReportDesignConst.Table_DataConnection);
-            if (td == null) {
-                throw new RuntimeException("报表定义不含“" + ReportDesignConst.Table_DataConnection + "”子表");
-            }
-
-            Form row = null;
-            for (Form r : td.getRows()) {
-                if (connectionId.equals(r.getString(ReportDesignConst.FieldName_ConnectionId))) {
-                    row = r;
-                    break;
-                }
-            }
-            boolean isNew = (row == null);
-            if (isNew) {
-                row = Op.newForm(td.getFormModelId());
-                row.setAttrValue(ReportDesignConst.FieldName_ConnectionId, connectionId);
-            }
-            row.setAttrValue(ReportDesignConst.FieldName_ConnectionUrl, url);
-            row.setAttrValue(ReportDesignConst.FieldName_UserName, StrUtil.blankToDefault(userName, ""));
-            // 密码回显哨兵协议：空或哨兵=未改密码，跳过写入即保留旧行密码（复用的 row 为查出的旧行）；
-            // 仅真实新值才转 Password 落库，避免把占位/脱敏值当真密码存回
-            if (StrUtil.isNotBlank(password) && !ReportDesignConst.Password_UnchangedSentinel.equals(password)) {
-                row.setAttrValue(ReportDesignConst.FieldName_Password, new gpf.adur.data.Password().setValue(password));
-            }
-            row.setAttrValue(ReportDesignConst.FieldName_DbDriver, StrUtil.blankToDefault(driver, ""));
-            row.setAttrValue(ReportDesignConst.FieldName_DbType, StrUtil.blankToDefault(dbType, ""));
-            if (isNew) td.add(row);
-
-            reportDef.setAttrValue(ReportDesignConst.Table_DataConnection, td);
-
-            reportDef = IFormMgr.get().updateForm(null, dao, reportDef, observer);
-            dao.commit();
-            return reportDef;
-        }
-    }
-
-    /**
-     * 删除报表定义”数据连接”子表中”连接标识”匹配的行。
-     *
-     * @param domain          业务域编号
-     * @param targetPanelCode 目标面板编号（经 Owner + 描述字段隐藏标记查询报表定义）
-     * @param connectionId    连接标识
-     * @return 更新后的报表定义 Form
-     * @throws Exception 面板/报表定义/子表缺失或落库失败
-     */
-    @MethodDeclare(
-            label = "删除数据连接", how = "", what = "", why = "",
-            inputs = {
-                    @InputDeclare(name = "domain", label = "业务域编号", desc = "", exampleValue = "$domain$"),
-                    @InputDeclare(name = "targetPanelCode", label = "目标面板编号", desc = ""),
-                    @InputDeclare(name = "connectionId", label = "连接标识", desc = ""),
-            }
-    )
-    default Form deleteDataConnection(String domain, String targetPanelCode, String connectionId) throws Exception {
-        if (StrUtil.isBlank(domain)) throw DomainException.Builder.busDomainCodeEmpty();
-        if (StrUtil.isBlank(targetPanelCode)) throw new RuntimeException("目标面板编号不能为空");
-        if (StrUtil.isBlank(connectionId)) throw new RuntimeException("连接标识不能为空");
-
-        OctoDomainOpObserver observer = Op.getOctoDomainOpObserver(domain);
-        if (observer == null) throw DomainException.Builder.notFoundWithCode(domain);
-
-        try (IDao dao = IDaoService.newIDao()) {
-            Form reportDef = loadReportDefByPanelCode(dao, targetPanelCode);
-
-            TableData td = reportDef.getTable(ReportDesignConst.Table_DataConnection);
-            if (td == null || Op.isEmpty(td)) return reportDef;
-
-            List<Form> remain = new ArrayList<>();
-            for (Form r : td.getRows()) {
-                if (!connectionId.equals(r.getString(ReportDesignConst.FieldName_ConnectionId))) {
-                    remain.add(r);
-                }
-            }
-            TableData newTd = new TableData(td.getFormModelId());
-            for (Form r : remain) newTd.add(r);
-            reportDef.setAttrValue(ReportDesignConst.Table_DataConnection, newTd);
-
-            reportDef = IFormMgr.get().updateForm(null, dao, reportDef, observer);
-            dao.commit();
-            return reportDef;
-        }
-    }
-
-    /**
-     * 列出报表定义”数据连接”子表的所有连接（密码字段以哨兵占位，绝不回传明文）。
-     *
-     * @param targetPanelCode 目标面板编号（经 Owner + 描述字段隐藏标记查询报表定义）
-     * @return 连接列表，每项含 连接标识/连接地址/用户名/数据库驱动/数据库类型/密码(哨兵占位)
-     * @throws Exception 面板/报表定义加载失败
-     */
-    @MethodDeclare(
-            label = "获取数据连接列表", how = "", what = "", why = "",
-            inputs = {
-                    @InputDeclare(name = "targetPanelCode", label = "目标面板编号", desc = ""),
-            }
-    )
-    default List<Map<String, Object>> listDataConnections(String targetPanelCode) throws Exception {
-        if (StrUtil.isBlank(targetPanelCode)) throw new RuntimeException("目标面板编号不能为空");
-
-        List<Map<String, Object>> result = new ArrayList<>();
-        try (IDao dao = IDaoService.newIDao()) {
-            Form reportDef = loadReportDefByPanelCode(dao, targetPanelCode);
-            TableData td = reportDef.getTable(ReportDesignConst.Table_DataConnection);
-            if (td == null || Op.isEmpty(td)) return result;
-
-            for (Form r : td.getRows()) {
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put(ReportDesignConst.FieldName_ConnectionId, r.getString(ReportDesignConst.FieldName_ConnectionId));
-                item.put(ReportDesignConst.FieldName_ConnectionUrl, r.getString(ReportDesignConst.FieldName_ConnectionUrl));
-                item.put(ReportDesignConst.FieldName_UserName, r.getString(ReportDesignConst.FieldName_UserName));
-                item.put(ReportDesignConst.FieldName_DbDriver, r.getString(ReportDesignConst.FieldName_DbDriver));
-                item.put(ReportDesignConst.FieldName_DbType, r.getString(ReportDesignConst.FieldName_DbType));
-                // 密码回显哨兵：有密码回占位哨兵（绝不回明文），无密码回空串；前端未改则原样回传，saveDataConnection 据此保留旧值
-                gpf.adur.data.Password passwordObj = r.getPassword(ReportDesignConst.FieldName_Password);
-                String rawPwd = (passwordObj != null) ? passwordObj.getValue() : "";
-                item.put(ReportDesignConst.FieldName_Password,
-                        StrUtil.isNotBlank(rawPwd) ? ReportDesignConst.Password_UnchangedSentinel : "");
-                result.add(item);
-            }
-            return result;
-        }
-    }
-
-    // ========================= 测试连接 / 取数 =========================
-
-    /**
-     * 测试数据连接：经 Owner + 描述字段隐藏标记查询报表定义（含真实密码）→
-     * 构建数据源 → 重建连接池 + 轻量探活查询（{@code SELECT 1}）。
-     *
-     * <p>报表设计器恒为编辑态（报表已发布、已有 Owner + 描述字段隐藏标记绑定），故按面板编号通过 Owner + 描述字段隐藏标记查询报表定义，
-     * 与取数一致；需先”保存连接”（saveDataConnection 已把连接落入报表定义子表）后再测试。</p>
-     *
-     * @param targetPanelCode 目标面板编号（经 Owner + 描述字段隐藏标记查询报表定义）
-     * @param connectionId    连接标识
-     * @return {@code {success:boolean, message:String}}
-     * @throws Exception 解析报表定义/数据连接失败
-     */
-    @MethodDeclare(
-            label = "测试数据连接", how = "", what = "", why = "",
-            inputs = {
-                    @InputDeclare(name = "targetPanelCode", label = "目标面板编号", desc = ""),
-                    @InputDeclare(name = "connectionId", label = "连接标识", desc = ""),
-            }
-    )
-    default Map<String, Object> testConnection(String targetPanelCode, String connectionId) throws Exception {
-        if (StrUtil.isBlank(targetPanelCode)) throw new RuntimeException("目标面板编号不能为空");
-        if (StrUtil.isBlank(connectionId)) throw new RuntimeException("连接标识不能为空");
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        try (IDao dao = IDaoService.newIDao()) {
-            Form reportDef = loadReportDefByPanelCode(dao, targetPanelCode);
-            Form connRow = findConnectionRow(reportDef, connectionId);
-            ReportJdbcDataSource ds = buildDataSource(connRow, reportDef.getUuid(), connectionId);
-
-            IJDBCService svc = IJDBCService.get();
-            svc.rebuildDbPool(ds, false);
-            svc.queryDataWithStatement(ds, new SqlStatementDto(ReportDesignConst.ProbeSql));
-
-            result.put("success", true);
-            result.put("message", "连接成功");
-        } catch (Exception e) {
-            // 不输出密码：仅回传异常消息
-            result.put("success", false);
-            result.put("message", StrUtil.blankToDefault(e.getMessage(), "连接失败"));
-        }
-        return result;
-    }
-
-    /**
-     * 运行态真参数化取数（Owner + 描述字段隐藏标记查询，零硬编码面板编号）。
+     * 运行态真参数化取数（通过报表定义面板配置定位数据集/连接）。
      *
      * <p>流程：按面板编号通过 Owner + 描述字段隐藏标记查询报表定义 → 选”数据连接”子表中”连接标识”匹配行构建数据源 → 用 {@link ReportQueryHelper#buildSqlStatement}
      * 组装真参数化语句（{@code $name} → {@code ?} 绑定，集合自动展开 IN 列表，绝不拼 SQL 文本，
@@ -389,8 +175,7 @@ public interface ReportDesignerExpr extends CellIntf {
      * 规整为 {@code {columns, rows, total}}。</p>
      *
      * @param targetPanelCode 面板编号（运行态/设计态统一，零硬编码）
-     * @param connectionId 连接标识
-     * @param sqlTemplate  SQL 模板（保留 {@code $name} 占位）
+     * @param datasetId    数据集编号
      * @param params       运行态绑定值（可空）；集合/数组展开为 IN 列表
      * @param pageNo       页码（从 1 开始，可空）
      * @param pageSize     页大小（可空）
@@ -400,36 +185,211 @@ public interface ReportDesignerExpr extends CellIntf {
     @MethodDeclare(
             label = "执行报表取数", how = "", what = "", why = "",
             inputs = {
-                    @InputDeclare(name = "targetPanelCode", label = "目标面板编号", desc = ""),
-                    @InputDeclare(name = "connectionId", label = "连接标识", desc = ""),
-                    @InputDeclare(name = "sqlTemplate", label = "SQL模板", desc = ""),
+                    @InputDeclare(name = "domain", label = "业务域编号", desc = "", exampleValue = "$domain$"),
+                    @InputDeclare(name = "reportDefPanelCode", label = "报表定义面板编号", desc = ""),
+                    @InputDeclare(name = "datasetId", label = "数据集编号", desc = ""),
                     @InputDeclare(name = "params", label = "绑定参数", desc = "", nullable = true),
                     @InputDeclare(name = "pageNo", label = "页码", desc = "", nullable = true),
                     @InputDeclare(name = "pageSize", label = "页大小", desc = "", nullable = true),
             }
     )
-    default Map<String, Object> executeReportQuery(String targetPanelCode, String connectionId, String sqlTemplate,
+    default Map<String, Object> executeReportQuery(String domain, String reportDefPanelCode, String datasetId,
                                                    Map<String, Object> params, Integer pageNo, Integer pageSize) throws Exception {
-        if (StrUtil.isBlank(targetPanelCode)) throw new RuntimeException("目标面板编号不能为空");
-        if (StrUtil.isBlank(connectionId)) throw new RuntimeException("连接标识不能为空");
-        if (StrUtil.isBlank(sqlTemplate)) throw new RuntimeException("SQL 模板不能为空");
+        if (StrUtil.isBlank(domain)) throw DomainException.Builder.busDomainCodeEmpty();
+        if (StrUtil.isBlank(reportDefPanelCode)) throw new RuntimeException("报表定义面板编号不能为空");
+        if (StrUtil.isBlank(datasetId)) throw new RuntimeException("数据集编号不能为空");
 
         try (IDao dao = IDaoService.newIDao()) {
-            Form reportDef = loadReportDefByPanelCode(dao, targetPanelCode);
-            Form connRow = findConnectionRow(reportDef, connectionId);
-            ReportJdbcDataSource ds = buildDataSource(connRow, targetPanelCode, connectionId);
+            String datasetPanelCode = resolveScenePanelCode(domain, dao, reportDefPanelCode, ReportDesignConst.SceneAttr_Dataset);
+            Form dataset = queryBusinessFormByCode(dao, domain, datasetPanelCode, datasetId);
+            if (dataset == null) throw new RuntimeException("未找到数据集[" + datasetId + "]");
 
-            SqlStatementDto stmt = ReportQueryHelper.buildSqlStatement(sqlTemplate, params, pageNo, pageSize);
+            String connectionId = dataset.getString(DataSourceConst.FieldName_DatabaseCode);
+            String datasetType = StrUtil.blankToDefault(dataset.getString(DataSourceConst.FieldName_DatasetType),
+                    DataSourceConst.DatasetType_Sql);
+            if (StrUtil.isBlank(connectionId)) throw new RuntimeException("数据集[" + datasetId + "]未配置数据连接编号");
+
+            String querySql;
+            Map<String, Object> sqlParams = params;
+            if (DataSourceConst.DatasetType_Table.equals(datasetType)) {
+                String schemaName = dataset.getString(DataSourceConst.FieldName_SchemaName);
+                String sourceTableName = dataset.getString(DataSourceConst.FieldName_SourceTableName);
+                querySql = DataSourceJdbcUtil.buildSourceTableSql(schemaName, sourceTableName);
+            } else if (DataSourceConst.DatasetType_Sql.equals(datasetType)) {
+                querySql = dataset.getString(DataSourceConst.FieldName_QuerySql);
+                if (StrUtil.isBlank(querySql)) throw new RuntimeException("数据集[" + datasetId + "]未配置查询SQL");
+                sqlParams = mergeQueryParams(dataset.getString(DataSourceConst.FieldName_QueryParams), params);
+            } else {
+                throw new RuntimeException("数据集[" + datasetId + "]数据集类型不支持：" + datasetType);
+            }
+
+            String databasePanelCode = resolveScenePanelCode(domain, dao, reportDefPanelCode, ReportDesignConst.SceneAttr_DataConnection);
+            Form connRow = queryBusinessFormByCode(dao, domain, databasePanelCode, connectionId);
+            if (connRow == null) throw new RuntimeException("未找到连接标识[" + connectionId + "]对应的数据连接");
+            ReportJdbcDataSource ds = buildDataSource(connRow, databasePanelCode, connectionId);
+
+            pageNo = defaultPageNo(pageNo);
+            pageSize = defaultPageSize(pageSize);
+            SqlStatementDto stmt = ReportQueryHelper.buildSqlStatement(querySql, sqlParams, pageNo, pageSize);
             PairDto<List<JdbcMetaInfoDto>, List<List<String>>> pair =
                     IJDBCService.get().queryDataWithStatement(ds, stmt);
-            return ReportQueryHelper.buildQueryResult(pair);
+            return DataSourceJdbcUtil.buildQueryListResult(pair);
         }
+    }
+
+    default Map<String, Object> mergeQueryParams(String queryParamsJson, Map<String, Object> runtimeParams) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (StrUtil.isNotBlank(queryParamsJson)) {
+            if (!queryParamsJson.trim().startsWith("{")) {
+                throw new RuntimeException("查询参数必须是JSON对象字符串");
+            }
+            JSONObject defaults;
+            try {
+                defaults = JSONUtil.parseObj(queryParamsJson);
+            } catch (Exception e) {
+                throw new RuntimeException("查询参数必须是JSON对象字符串", e);
+            }
+            for (Map.Entry<String, Object> entry : defaults.entrySet()) {
+                merged.put(entry.getKey(), entry.getValue());
+            }
+        }
+        if (runtimeParams != null) {
+            merged.putAll(runtimeParams);
+        }
+        return merged;
+    }
+
+    default int defaultPageNo(Integer pageNo) {
+        return pageNo == null || pageNo < 1 ? ReportDesignConst.DefaultPageNo : pageNo;
+    }
+
+    default int defaultPageSize(Integer pageSize) {
+        return pageSize == null || pageSize < 1 ? ReportDesignConst.DefaultPageSize : pageSize;
     }
 
     // ========================= 支撑方法 =========================
 
+    default String resolveScenePanelCode(String domain, IDao dao, String reportDefPanelCode, String sceneAttrName) throws Exception {
+        Form reportDefPanel = loadReportDefPanelDesign(domain, dao, reportDefPanelCode);
+        TableData td = reportDefPanel.getTable(PanelDesignConst.FieldName_PanelData);
+        if (td == null || Op.isEmpty(td)) {
+            throw new RuntimeException("报表定义面板[" + reportDefPanelCode + "]不含“" + PanelDesignConst.FieldName_PanelData + "”子表");
+        }
+        for (Form row : td.getRows()) {
+            if (!sceneAttrName.equals(row.getString(PanelDesignConst.FieldName_SceneAttrName))) continue;
+            String style = row.getString(PanelDesignConst.FieldName_SceneAttrStyle);
+            if (!isPanelRefStyle(style)) {
+                throw new RuntimeException("报表定义面板[" + reportDefPanelCode + "]的场景属性[" + sceneAttrName + "]样式不是下拉框/表格/表单：" + style);
+            }
+            String panelCode = extractStylePanelCode(style);
+            if (StrUtil.isBlank(panelCode)) {
+                throw new RuntimeException("报表定义面板[" + reportDefPanelCode + "]的场景属性[" + sceneAttrName + "]样式未配置业务面板编号：" + style);
+            }
+            return panelCode;
+        }
+        throw new RuntimeException("报表定义面板[" + reportDefPanelCode + "]未找到场景属性[" + sceneAttrName + "]");
+    }
+
+    default Form loadReportDefPanelDesign(String domain, IDao dao, String reportDefPanelCode) throws Exception {
+        OctoDomainOpObserver observer = Op.getOctoDomainOpObserver(domain);
+        if (observer == null) throw DomainException.Builder.notFoundWithCode(domain);
+        Form panel = IPanelDesignService.get().getPanelDesign(dao, observer, reportDefPanelCode, true);
+        if (panel == null) throw PanelDesignException.Builder.notFoundWithCode(reportDefPanelCode);
+        return panel;
+    }
+
+    default boolean isPanelRefStyle(String style) {
+        if (StrUtil.isBlank(style)) return false;
+        String styleName = styleName(style);
+        return styleName.contains("下拉框") || styleName.endsWith("表格") || styleName.endsWith("表单");
+    }
+
+    default String extractStylePanelCode(String style) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("'([^']*)'").matcher(style);
+        if (!matcher.find()) return null;
+        String panelCode = matcher.group(1);
+        return StrUtil.isBlank(panelCode) ? null : StrUtil.removeSuffix(panelCode, "_CM");
+    }
+
+    default String styleName(String style) {
+        int idx = style.indexOf('(');
+        return (idx < 0 ? style : style.substring(0, idx)).trim();
+    }
+
+    default Form queryBusinessFormByCode(IDao dao, String domain, String panelCode, String formCode) throws Exception {
+        return DataSourceJdbcUtil.queryBusinessFormByCode(dao, domain, panelCode, formCode);
+    }
+
+    default boolean updateExecuteReportQueryEvent(IDao dao, Form panelDesign, String reportDefPanelCode) throws Exception {
+        if (panelDesign == null || StrUtil.isBlank(reportDefPanelCode)) return false;
+        TableData td = panelDesign.getTable(PanelDesignConst.FieldName_PanelEvent);
+        if (td == null || Op.isEmpty(td)) return false;
+        for (Form row : td.getRows()) {
+            AssociationData ac = row.getAssociation(PanelDesignConst.FieldName_EventImpl);
+            Form event = Op.queryFormByAc(dao, ac);
+            if (event == null || !ReportDesignConst.Event_ExecuteReportQuery.equals(event.getString(PanelDesignConst.FieldName_EventName))) {
+                continue;
+            }
+            if (updateEventActionFirstArg(event, reportDefPanelCode)) {
+                IFormMgr.get().updateForm(dao, event);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    default boolean updateEventActionFirstArg(Form event, String reportDefPanelCode) throws Exception {
+        TableData actionTd = event.getTable(PanelDesignConst.FieldName_EventAction);
+        if (actionTd == null || Op.isEmpty(actionTd)) return false;
+        boolean changed = false;
+        for (Form action : actionTd.getRows()) {
+            String expr = action.getString(PanelDesignConst.FieldName_OperateFunction);
+            String updated = replaceExecuteReportQueryFirstArg(expr, reportDefPanelCode);
+            if (!StrUtil.equals(expr, updated)) {
+                action.setAttrValue(PanelDesignConst.FieldName_OperateFunction, updated);
+                changed = true;
+            }
+        }
+        if (changed) event.setAttrValue(PanelDesignConst.FieldName_EventAction, actionTd);
+        return changed;
+    }
+
+    default String replaceExecuteReportQueryFirstArg(String expr, String reportDefPanelCode) {
+        if (StrUtil.isBlank(expr)) return expr;
+        String prefix = ReportDesignConst.Function_ExecuteReportQuery + "(";
+        int start = expr.indexOf(prefix);
+        if (start < 0) return expr;
+        int argStart = start + prefix.length();
+        int argEnd = findFirstArgEnd(expr, argStart);
+        if (argEnd < argStart) return expr;
+        String expected = "\"" + reportDefPanelCode + "\"";
+        String firstArg = expr.substring(argStart, argEnd).trim();
+        if (expected.equals(firstArg)) return expr;
+        return expr.substring(0, argStart) + expected + expr.substring(argEnd);
+    }
+
+    default int findFirstArgEnd(String expr, int from) {
+        char quote = 0;
+        for (int i = from; i < expr.length(); i++) {
+            char c = expr.charAt(i);
+            if ((c == '\'' || c == '"') && (i == from || expr.charAt(i - 1) != '\\')) {
+                quote = quote == 0 ? c : (quote == c ? 0 : quote);
+            } else if (quote == 0 && (c == ',' || c == ')')) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    default String extractPanelCodeFromFormModelId(String formModelId) {
+        if (StrUtil.isBlank(formModelId)) return null;
+        String panelCode = formModelId.substring(formModelId.lastIndexOf('.') + 1);
+        panelCode = panelCode.replaceFirst("^iML", "IML");
+        return StrUtil.removeSuffix(panelCode, "_CM");
+    }
+
     /**
-     * 按面板编号通过 Owner + 描述字段隐藏标记查询报表定义 Form。
+     * 旧兼容：按面板编号通过 Owner + 描述字段隐藏标记查询报表定义 Form。
      *
      * <p>查询步骤：
      * <ol>
@@ -445,6 +405,7 @@ public interface ReportDesignerExpr extends CellIntf {
      * @return 报表定义 Form
      * @throws Exception 面板不存在 / 未绑定报表定义 / 报表定义加载失败
      */
+    @Deprecated
     default Form loadReportDefByPanelCode(IDao dao, String panelCode) throws Exception {
         Form panel = Op.queryFormByValueMatchAnyField(dao, WorkBenchConst.FormModelId_PanelDesign,
                 CollUtil.newHashSet(PanelDesignConst.FieldName_PanelCode), panelCode, null);
@@ -514,13 +475,6 @@ public interface ReportDesignerExpr extends CellIntf {
      * @throws Exception 读取字段失败
      */
     default ReportJdbcDataSource buildDataSource(Form connRow, String panelCode, String connectionId) throws Exception {
-        String url = connRow.getString(ReportDesignConst.FieldName_ConnectionUrl);
-        String user = connRow.getString(ReportDesignConst.FieldName_UserName);
-        // 密码字段是 Password 类型，需要用 getPassword() 获取对象再调用 getValue() 获取明文
-        gpf.adur.data.Password passwordObj = connRow.getPassword(ReportDesignConst.FieldName_Password);
-        String pwd = (passwordObj != null) ? passwordObj.getValue() : "";
-        String driver = connRow.getString(ReportDesignConst.FieldName_DbDriver);
-        String dbType = connRow.getString(ReportDesignConst.FieldName_DbType);
-        return ReportJdbcDataSource.of(panelCode, connectionId, url, user, pwd, driver, dbType);
+        return DataSourceJdbcUtil.buildDataSource(connRow, panelCode, connectionId);
     }
 }

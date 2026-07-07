@@ -9,8 +9,7 @@ import org.nutz.dao.entity.annotation.Comment;
  * <p>集中存放报表设计器后端用到的【中文字段名】、【事件/按钮名】与【SQL 占位符约定】，
  * 避免散落在各操作函数里出现魔法字符串。面板设计相关的模型 id（如
  * {@link WorkBenchConst#FormModelId_PanelDesign}）一律复用 {@link WorkBenchConst}，
- * 本类【不】新建报表专属面板模型常量，运行期通过双向绑定查询报表定义：
- * {@code 面板.Owner} 提供 FormModelId（跨环境稳定），{@code "关联面板"} 字段唯一定位实例。</p>
+ * 本类【不】新建报表专属面板模型常量，运行期通过报表定义面板配置里的业务面板引用定位数据集/连接。</p>
  *
  * <p>事件名与前端 {@code src/engine/datasource/ExternalDataSource.ts} 的
  * {@code EXTERNAL_QUERY_EVENT} 等保持逐字一致，便于 {@code callEvent} 契约对齐。</p>
@@ -43,6 +42,9 @@ public final class ReportDesignConst {
      */
     public static final String Event_ExecuteReportQuery = "操作_执行数据查询";
 
+    /** 执行取数操作函数名。 */
+    public static final String Function_ExecuteReportQuery = "执行报表取数";
+
     /** 测试数据连接事件名（与前端契约一致）。 */
     public static final String Event_TestConnection = "操作_测试数据连接";
 
@@ -69,6 +71,12 @@ public final class ReportDesignConst {
 
     /** 报表定义自身的“报表描述”字段名（发布时映射为面板描述）。 */
     public static final String FieldName_ReportDesc = "报表描述";
+
+    /** 报表定义面板里指向数据连接业务面板的场景属性名。 */
+    public static final String SceneAttr_DataConnection = "数据连接";
+
+    /** 报表定义面板里指向数据集业务面板的场景属性名。 */
+    public static final String SceneAttr_Dataset = "数据集";
 
     // ========================= “数据连接”子表字段（报表定义内） =========================
 
@@ -106,6 +114,12 @@ public final class ReportDesignConst {
     /** 数据库类型字段名（对应 {@code cmn.enums.sql.DBTypeEnum} 的 typeName）。 */
     public static final String FieldName_DbType = "数据库类型";
 
+    /** 数据集业务表里保存数据连接编号的字段名，按 Form.Code 查询数据连接。 */
+    public static final String FieldName_DatabaseCode = "数据连接编号";
+
+    /** 数据集业务表里的查询 SQL 字段名。 */
+    public static final String FieldName_QuerySql = "查询SQL";
+
     // ========================= SQL 占位符 / 取数约定 =========================
 
     /**
@@ -120,6 +134,10 @@ public final class ReportDesignConst {
     /** 连接探活用的轻量查询语句（testConnection 使用）。 */
     public static final String ProbeSql = "SELECT 1";
 
+    public static final int DefaultPageNo = 1;
+
+    public static final int DefaultPageSize = 20;
+
     /** 取数结果中“列信息”的键名。 */
     public static final String ResultKey_Columns = "columns";
 
@@ -128,6 +146,20 @@ public final class ReportDesignConst {
 
     /** 取数结果中“总行数”的键名。 */
     public static final String ResultKey_Total = "total";
+
+    public static final String SqlStructKey_FieldName = "fieldName";
+
+    public static final String SqlStructKey_FieldLabel = "fieldLabel";
+
+    public static final String SqlStructKey_TypeName = "typeName";
+
+    public static final String SqlStructKey_FieldType = "fieldType";
+
+    public static final String FieldType_Text = "文本";
+
+    public static final String FieldType_Number = "数值";
+
+    public static final String FieldType_Date = "日期";
 
     // ========================= 数据连接默认连接池参数 =========================
 

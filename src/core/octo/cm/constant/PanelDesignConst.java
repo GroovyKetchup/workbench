@@ -44,6 +44,27 @@ public final class PanelDesignConst {
     /** 面板设计 Form 的“面板描述”字段名。 */
     public static final String FieldName_PanelDesc = "面板描述";
 
+    /** 面板设计 Form 的“面板数据”子表名。 */
+    public static final String FieldName_PanelData = "面板数据";
+
+    /** 面板设计 Form 的“面板网页”子表名。 */
+    public static final String FieldName_PanelWebPage = "面板网页";
+
+    /** 面板设计 Form 的“页面入口”字段名。 */
+    public static final String FieldName_PageEntry = "页面入口";
+
+    /** “面板网页”子表行里的“页面名称”字段名。 */
+    public static final String FieldName_PageName = "页面名称";
+
+    /** “面板网页”子表行里的“页面代码”字段名。 */
+    public static final String FieldName_PageCode = "页面代码";
+
+    /** “面板数据”子表行里的“场景属性名称”字段名。 */
+    public static final String FieldName_SceneAttrName = "场景属性名称";
+
+    /** “面板数据”子表行里的“场景属性样式”字段名。 */
+    public static final String FieldName_SceneAttrStyle = "场景属性样式";
+
     // ========================= 面板事件（子表 + 事件轴模型） =========================
 
     /** 面板设计 Form 的“面板事件”子表名。 */
@@ -54,4 +75,10 @@ public final class PanelDesignConst {
 
     /** 事件轴模型（{@link WorkBenchConst#FormModelId_Axis_Event}）的“事件名称”字段名。 */
     public static final String FieldName_EventName = "事件名称";
+
+    /** 事件定义 Form 的“事件动作”子表名。 */
+    public static final String FieldName_EventAction = "事件动作";
+
+    /** 事件动作子表行里的“操作函数”字段名。 */
+    public static final String FieldName_OperateFunction = "操作函数";
 }

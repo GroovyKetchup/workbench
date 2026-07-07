@@ -14,6 +14,7 @@ import octocm.domain.observer.OctoDomainOpObserver;
 
 import static octo.cm.constant.WorkBenchConst.FormModelId_Axis_Event;
 import static octo.cm.constant.WorkBenchConst.SlaveFormModelId_PanelDesign_Constraint_Event;
+import static octo.cm.constant.WorkBenchConst.SlaveFormModelId_PanelDesign_View_Orchestration_WebPage;
 
 import org.nutz.dao.entity.annotation.Comment;
 import org.nutz.dao.util.cri.SqlExpression;
@@ -26,13 +27,12 @@ import org.nutz.dao.util.cri.SqlExpression;
  * 报表面板不涉及流程的面板状态/业务编排/面板权限，故只走通用顶层字段 + 面板角色 + 面板数据 +
  * 面板按钮 + 默认视图。</p>
  *
- * <p><b>双向关联：</b>发布后建立双向绑定：
+ * <p><b>双向关联：</b>发布后建立关联：
  * <ul>
  *   <li>{@code 面板.Form.Owner = 报表定义.uuid}（本类负责）</li>
- *   <li>{@code 面板.面板描述 += “<!--REPORT_DEF_MODEL_ID:FormModelId-->”}（本类负责，HTML 注释隐藏标记）</li>
  *   <li>{@code 报表定义.”关联面板” = 面板编号}（调用方 {@link cell.octo.cm.expr.ReportDesignerExpr#publishToPanelDesign} 负责）</li>
  * </ul>
- * 运行态通过 Owner + 描述字段隐藏标记联合查询报表定义，支持多报表定义模型，跨环境自动迁移。</p>
+ * 运行态通过报表定义面板配置里的业务面板引用定位数据集/连接。</p>
  *
  * @author Devin
  * @version 1.0
@@ -41,8 +41,8 @@ import org.nutz.dao.util.cri.SqlExpression;
 @ClassDeclare(
         label = "报表设计发布到面板设计的处理器",
         what = "把报表定义一次性物化进目标面板",
-        why = "镜像流程发布；建立双向绑定（Owner + 描述字段隐藏标记 + 关联面板字段）",
-        how = "继承 AbstractToPanelDesignPublisher，复用公共面板物化逻辑；描述字段追加 HTML 注释标记存 FormModelId",
+        why = "镜像流程发布；建立报表定义和面板关联",
+        how = "继承 AbstractToPanelDesignPublisher，复用公共面板物化逻辑",
         developer = "Devin", version = "1.0",
         createTime = "2026-06-25", updateTime = "2026-06-26"
 )
@@ -88,28 +88,59 @@ public class ReportToPanelDesignPublisher extends AbstractToPanelDesignPublisher
         fillPanelButtons();
         ensureDefaultCreateButton();
         ensureSystemDefaultButtons();
-        buildDefaultViews();
+        // buildDefaultViews();
+        ensureInitialWebPageOnNewPanel();
         // 报表面板固定挂一条「操作_执行数据查询」面板事件，供运行态取数
         ensureExecDataQueryPanelEvent();
 
-        // 双向绑定：
-        // 1. Owner 存报表定义 uuid（用于关联和联动删除）
-        // 2. 面板描述末尾追加隐藏标记存 FormModelId（支持多报表定义模型，跨环境自动迁移）
+        // 关联：Owner 存报表定义 uuid（用于关联和联动删除）
         if (defForm != null) {
             panel.setAttrValueByCode(Form.Owner, defForm.getUuid());
-
-            String panelDesc = panel.getString(PanelDesignConst.FieldName_PanelDesc);
-            if (panelDesc == null) panelDesc = "";
-            // 移除旧标记
-            panelDesc = panelDesc.replaceAll("<!--REPORT_DEF_MODEL_ID:.*?-->", "");
-            // 追加新标记（HTML 注释，前端不可见）
-            String marker = "<!--REPORT_DEF_MODEL_ID:" + defForm.getFormModelId() + "-->";
-            panel.setAttrValue(PanelDesignConst.FieldName_PanelDesc, panelDesc + marker);
         }
 
         panel = IFormMgr.get().updateForm(null, dao, panel, observer);
         dao.commit();
         return panel;
+    }
+
+    /**
+     * 报表发布不创建默认表格/表单，但首次创建目标面板时仍需要一个页面入口供菜单发布。
+     */
+    protected void ensureInitialWebPageOnNewPanel() throws Exception {
+        if (!isNewPanel()) {
+            return;
+        }
+        String panelName = panel.getString(PanelDesignConst.FieldName_PanelName);
+        if (panelName == null || panelName.trim().isEmpty()) {
+            return;
+        }
+
+        TableData webPageTd = new TableData(SlaveFormModelId_PanelDesign_View_Orchestration_WebPage);
+        Form webPageForm = Op.newForm(webPageTd.getFormModelId());
+        webPageForm.setAttrValue(PanelDesignConst.FieldName_PageName, panelName);
+        webPageForm.setAttrValue(PanelDesignConst.FieldName_PageCode, buildEmptyPageCode(panelName));
+        webPageTd.add(webPageForm);
+
+        panel.setAttrValue(PanelDesignConst.FieldName_PanelWebPage, webPageTd);
+        panel.setAttrValue(PanelDesignConst.FieldName_PageEntry, panelName);
+    }
+
+    protected String buildEmptyPageCode(String pageName) {
+        JSONObject component = new JSONObject();
+        component.set("type", "Section");
+        component.set("id", "root");
+        component.set("props", new JSONObject());
+        component.set("children", new cn.hutool.json.JSONArray());
+
+        JSONObject pageSelfData = new JSONObject();
+        pageSelfData.set("dataSource", new cn.hutool.json.JSONArray());
+
+        JSONObject page = new JSONObject();
+        page.set("pageId", pageName);
+        page.set("pageName", pageName);
+        page.set("component", component);
+        page.set("pageSelfData", pageSelfData);
+        return page.toString();
     }
 
     /**
